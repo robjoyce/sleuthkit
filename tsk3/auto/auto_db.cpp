@@ -174,7 +174,7 @@ uint8_t
 TskAutoDb::addImageDetails(const char *const img_ptrs[], int a_num)
 {
     if (m_db->addImageInfo(m_img_info->itype, m_img_info->sector_size,
-            m_curImgId)) {
+            m_curImgId, m_curImgTZone)) {
         return 1;
     }
 
@@ -297,7 +297,7 @@ TSK_RETVAL_ENUM
     TskAutoDb::insertFileData(TSK_FS_FILE * fs_file,
     const TSK_FS_ATTR * fs_attr, const char *path,
     const unsigned char *const md5,
-    const TSK_AUTO_CASE_KNOWN_FILE_ENUM known)
+    const TSK_DB_FILES_KNOWN_ENUM known)
 {
     if (m_db->addFsFile(fs_file, fs_attr, path, md5, known, m_curFsId,
             m_curFileId)) {
@@ -313,7 +313,7 @@ TSK_RETVAL_ENUM
  * all changes on error. When runProcess()
  * returns, user must call either commitAddImage() to commit the changes,
  * or revertAddImage() to revert them.
- * @returns 1 if any error occured (messages will be registered in list) and 0 on success
+ * @returns 1 if any error occured (messages will be registered in list), 2 if error occured but add image process can continue, and 0 on success
  */
 uint8_t
     TskAutoDb::startAddImage(int numImg, const TSK_TCHAR * const imagePaths[],
@@ -355,9 +355,8 @@ uint8_t
     }
     
     if (addFilesInImgToDb()) {
-        if (revertAddImage())
-            registerError();
-        return 1;
+        //do not roll back if errors in this case, but do report registered errors
+        return 2;
     }
     return 0;
 }
@@ -368,13 +367,14 @@ uint8_t
     TSK_IMG_TYPE_ENUM imgType, unsigned int sSize)
 {
     if (tsk_verbose)
-        tsk_fprintf(stderr, "TskAutoDb::startAddImage: Starting add image process\n");
+        tsk_fprintf(stderr, "TskAutoDb::startAddImage_utf8: Starting add image process\n");
    
 
     if (m_db->releaseSavepoint(TSK_ADD_IMAGE_SAVEPOINT) == 0) {
         tsk_error_reset();
         tsk_error_set_errno(TSK_ERR_AUTO_DB);
         tsk_error_set_errstr("TskAutoDb::startAddImage(): An add-image savepoint already exists");
+        registerError();
         return 1;
     }
 
@@ -383,30 +383,31 @@ uint8_t
         tsk_error_reset();
         tsk_error_set_errno(TSK_ERR_AUTO_DB);
         tsk_error_set_errstr("TskAutoDb::startAddImage(): Already in a transaction, image might not be commited");
+        registerError();
         return 1;
     }
 
 
-    if (m_db->createSavepoint(TSK_ADD_IMAGE_SAVEPOINT))
+    if (m_db->createSavepoint(TSK_ADD_IMAGE_SAVEPOINT)) {
+        registerError();
         return 1;
+    }
 
     m_imgTransactionOpen = true;
 
-    if (openImageUtf8(numImg, imagePaths, imgType, sSize)
-        || addFilesInImgToDb()) {
-        // rollback on error
-
-        // rollbackSavepoint can throw errors too, need to make sure original
-        // error message is preserved;
-        const char *prior_msg = tsk_error_get();
-        if (revertAddImage()) {
-            if (prior_msg) {
-                tsk_error_set_errstr("%s caused: %s", prior_msg,
-                    tsk_error_get());
-            }
-        }
+    if (openImageUtf8(numImg, imagePaths, imgType, sSize)) {
+        tsk_error_set_errstr2("TskAutoDb::startAddImage");
+        registerError();
+        if (revertAddImage())
+            registerError();
         return 1;
     }
+
+    if (addFilesInImgToDb()) {
+        //do not roll back if errors in this case, but do report registered errors
+        return 2;
+    }
+
     return 0;
 }
 #endif
@@ -489,6 +490,15 @@ TskAutoDb::commitAddImage()
     return m_curImgId;
 }
 
+/**
+ * Set the current image's timezone
+ */
+void
+TskAutoDb::setTz(string tzone)
+{
+    m_curImgTZone = tzone;
+}
+
 TSK_RETVAL_ENUM
 TskAutoDb::processFile(TSK_FS_FILE * fs_file, const char *path)
 {
@@ -505,7 +515,7 @@ TskAutoDb::processFile(TSK_FS_FILE * fs_file, const char *path)
      * up if TSK is more consistent about if there should always be an attribute or not */
     TSK_RETVAL_ENUM retval;
     if (tsk_fs_file_attr_getsize(fs_file) == 0)
-        retval = insertFileData(fs_file, NULL, path, NULL, TSK_AUTO_CASE_FILE_KNOWN_UNKNOWN);
+        retval = insertFileData(fs_file, NULL, path, NULL, TSK_DB_FILES_KNOWN_UNKNOWN);
     else
         retval = processAttributes(fs_file, path);
 
@@ -529,7 +539,7 @@ TskAutoDb::processAttribute(TSK_FS_FILE * fs_file,
         unsigned char *md5 = NULL;
         memset(hash, 0, 16);
 
-        TSK_AUTO_CASE_KNOWN_FILE_ENUM file_known = TSK_AUTO_CASE_FILE_KNOWN_UNKNOWN;
+        TSK_DB_FILES_KNOWN_ENUM file_known = TSK_DB_FILES_KNOWN_UNKNOWN;
 
 		if (m_fileHashFlag && isFile(fs_file)) {
             if (md5HashAttr(hash, fs_attr)) {
@@ -544,7 +554,7 @@ TskAutoDb::processAttribute(TSK_FS_FILE * fs_file,
                     registerError();
                     return TSK_OK;
                 } else if (retval) {
-                    file_known = TSK_AUTO_CASE_FILE_KNOWN_KNOWN;
+                    file_known = TSK_DB_FILES_KNOWN_KNOWN;
                 }
             }
 
@@ -554,7 +564,7 @@ TskAutoDb::processAttribute(TSK_FS_FILE * fs_file,
                     registerError();
                     return TSK_OK;
                 } else if (retval) {
-                    file_known = TSK_AUTO_CASE_FILE_KNOWN_BAD;
+                    file_known = TSK_DB_FILES_KNOWN_KNOWN_BAD;
                 }
             }
         }
@@ -578,8 +588,8 @@ TskAutoDb::processAttribute(TSK_FS_FILE * fs_file,
             if (run->flags & TSK_FS_ATTR_RUN_FLAG_SPARSE)
                 continue;
 
-            // @@@ We probaly want ot keep on going here
-            if (m_db->addFsBlockInfo(m_curFsId, m_curFileId,
+            // @@@ We probaly want to keep on going here
+            if (m_db->addFileLayoutRange(m_curFileId,
                     run->addr * block_size, run->len * block_size, sequence++)) {
                 registerError();
                 return TSK_OK;
