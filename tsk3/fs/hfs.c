@@ -70,6 +70,8 @@
  * Contains the general internal TSK HFS metadata and data unit code -- Not included in code by default.
  */
 
+// TODO:  Should be string.h for windows, strings.h for everyone else
+#include <string.h>
 #include <stdarg.h>
 #include "tsk_fs_i.h"
 #include "tsk_hfs.h"
@@ -90,8 +92,8 @@ static void reset_attribute_counter();
 static uint8_t hfs_load_extended_attrs(TSK_FS_FILE * file,
     unsigned char *isCompressed, unsigned char *compDataInRSRC,
     uint64_t * uncSize);
-static void error_detected(uint32_t errnum, char *errstr, ...);
-static void error_returned(char *errstr, ...);
+void error_detected(uint32_t errnum, char *errstr, ...);
+void error_returned(char *errstr, ...);
 
 #ifdef HAVE_LIBZ
 
@@ -126,6 +128,13 @@ zlib_inflate(char *source, uint64_t sourceLen, char *dest, uint64_t destLen, uin
     unsigned char in[CHUNK];
     unsigned char out[CHUNK];
 
+	// Some vars to help with copying bytes into "in"
+    char *srcPtr = source;
+    char *destPtr = dest;
+    uint64_t srcAvail = sourceLen;      //uint64_t
+    uint64_t amtToCopy;
+    uint64_t copiedSoFar = 0;
+
     /* allocate inflate state */
     strm.zalloc = Z_NULL;
     strm.zfree = Z_NULL;
@@ -136,12 +145,7 @@ zlib_inflate(char *source, uint64_t sourceLen, char *dest, uint64_t destLen, uin
     if (ret != Z_OK)
         return ret;
 
-    // Some vars to help with copying bytes into "in"
-    char *srcPtr = source;
-    char *destPtr = dest;
-    uint64_t srcAvail = sourceLen;      //uint64_t
-    uint64_t amtToCopy;
-    uint64_t copiedSoFar = 0;
+    
 
     /* decompress until deflate stream ends or end of file */
     do {
@@ -158,9 +162,13 @@ zlib_inflate(char *source, uint64_t sourceLen, char *dest, uint64_t destLen, uin
         }
         // wipe out any previous value, copy in the bytes, advance the pointer, record number of bytes.
         memset(in, 0, CHUNK);
-        memcpy(in, srcPtr, amtToCopy);
+		if(amtToCopy > SIZE_MAX || amtToCopy > UINT_MAX) {
+			error_detected(TSK_ERR_FS_READ, "zlib_inflate: amtToCopy in one chunk is too large");
+			return 1;
+		}
+        memcpy(in, srcPtr, (size_t) amtToCopy);  // cast OK because of above test
         srcPtr += amtToCopy;
-        strm.avail_in = amtToCopy;
+        strm.avail_in =  (uInt) amtToCopy;   // cast OK because of above test
 
         if (strm.avail_in == 0)
             break;
@@ -428,6 +436,7 @@ hfs_ext_find_extent_record_attr(HFS_INFO * hfs, uint32_t cnid,
     uint32_t cur_node;          /* node id of the current node */
     char *node = NULL;
     uint8_t is_done;
+	uint8_t desiredType;
 
     tsk_error_reset();
 
@@ -438,8 +447,8 @@ hfs_ext_find_extent_record_attr(HFS_INFO * hfs, uint32_t cnid,
             dataForkQ ? "data fork" : "resource fork");
 
     // Are we looking for extents of the data fork or the resource fork?
-    uint8_t desiredType =
-        dataForkQ ? HFS_EXT_KEY_TYPE_DATA : HFS_EXT_KEY_TYPE_RSRC;
+    //unsigned char desiredType;	
+    desiredType = dataForkQ ? HFS_EXT_KEY_TYPE_DATA : HFS_EXT_KEY_TYPE_RSRC;
 
 
     // Load the extents attribute, if it has not been done so yet.
@@ -1241,6 +1250,164 @@ hfs_cat_read_file_folder_record(HFS_INFO * hfs, TSK_OFF_T off,
     return 0;
 }
 
+/*
+ * Given a catalog entry, will test that entry to see if it is a hard link.
+ * If it is a hard link, the function returns the inum (or cnid) of the target file.
+ * If it is NOT a hard link, then then function returns the inum of the given entry.
+ * In both cases, the parameter is_error is set to zero.
+ *
+ * If an ERROR occurs, if it is a mild error, then is_error is set to 1, and the
+ * inum of the given entry is returned.  This signals that hard link detection cannot
+ * be carried out.
+ *
+ * If the error is serious, then is_error is set to 2 or 3, depending on the kind of error, and
+ * the TSK error code is set, and the function returns zero.  is_error==2 means that an error
+ * occured in looking up the target file in the Catalog.  is_error==3 means that the given
+ * entry appears to be a hard link, but the target file does not exist in the Catalog.
+ *
+ * @param hfs The file system
+ * @param entry The catalog entry to check
+ * @param is_error A Boolean that is returned indicating an error, or no error.\
+ * @return The inum (or cnid) of the hard link target, or of the given catalog entry, or zero.
+ */
+TSK_INUM_T
+hfs_follow_hard_link(HFS_INFO * hfs, hfs_file * cat, unsigned char * is_error) {
+
+	TSK_FS_INFO * fs = (TSK_FS_INFO *) hfs;
+	TSK_INUM_T cnid;
+	time_t crtime;
+	uint32_t file_type;
+	uint32_t file_creator;
+
+	*is_error = 0;  // default, not an error
+
+	if(cat == NULL) {
+		error_detected(TSK_ERR_FS_ARG, "hfs_follow_hard_link: Pointer to Catalog entry (2nd arg) is null");
+		return 0;
+	}
+
+	cnid = tsk_getu32(fs->endian, cat->std.cnid);
+
+	if(cnid < HFS_FIRST_USER_CNID) {
+		// Can't be a hard link.  And, cannot look up in Catalog file either!
+		return cnid;
+	}
+
+	crtime = (time_t) hfs_convert_2_unix_time(tsk_getu32(fs->endian, cat->std.crtime));
+
+
+	file_type = tsk_getu32(fs->endian,  cat->std.u_info.file_type);
+	file_creator = tsk_getu32(fs->endian, cat->std.u_info.file_cr);
+
+	// Only proceed with the rest of this if the flags etc are right
+	if(file_type == HFS_HARDLINK_FILE_TYPE && file_creator == HFS_HARDLINK_FILE_CREATOR) {
+
+		// For this to work, we need the FS creation times.  Is at least one of these set?
+		if( ! hfs->has_root_crtime && ! hfs->has_meta_dir_crtime && ! hfs->has_meta_crtime) {
+			uint32_t linkNum = tsk_getu32(fs->endian, cat->std.perm.special.inum);
+			*is_error = 1;
+			tsk_fprintf(stderr, "WARNING: hfs_follow_hard_link: File system creation times are not set. "
+					"Cannot test inode for hard link. File type and creator indicate that this"
+					" is a hard link (file), with LINK ID = %" PRIu32 "\n", linkNum);
+			return cnid;
+		}
+
+		// Now we need to check the creation time against the three FS creation times
+		if((hfs->has_meta_crtime && crtime == hfs->meta_crtime) ||
+				(hfs->has_meta_dir_crtime && crtime == hfs->metadir_crtime) ||
+				(hfs->has_root_crtime && crtime == hfs->root_crtime)) {
+			// OK, this is a hard link to a file.
+			uint32_t linkNum = tsk_getu32(fs->endian, cat->std.perm.special.inum);
+			char fNameBuf[50];
+			int8_t result;
+			TSK_INUM_T target_cnid;   //  This is the real CNID of the file.
+
+			memset(fNameBuf, 0, 50);
+			snprintf(fNameBuf, 50, "/" UTF8_NULL_REPLACE  UTF8_NULL_REPLACE UTF8_NULL_REPLACE UTF8_NULL_REPLACE
+					"HFS+ Private Data/iNode%" PRIu32, linkNum);
+			
+
+			result = tsk_fs_path2inum(fs, fNameBuf, &target_cnid, NULL);
+			if(result == 0) {
+				// Succeeded in finding that target_cnid in the Catalog file
+				return target_cnid;
+			} else {
+				// This should be a hard link, BUT...
+				// Did not find the target_cnid in the Catalog file.
+				printf(" error\n");
+				if(result == -1) {
+					error_returned("hfs_follow_hard_link: error in looking up the path %s to the link target"
+							" file in the Catalog", fNameBuf);
+					*is_error = 2;
+				} else {
+					error_detected(TSK_ERR_FS_CORRUPT,
+							"hfs_follow_hard_link: error, target of hard link, with path %s"
+							" does not exist in the filesystem", fNameBuf);
+					*is_error = 3;
+				}
+				return 0;  // because of error
+			}
+		}
+
+	} else if (file_type == HFS_LINKDIR_FILE_TYPE && file_creator == HFS_LINKDIR_FILE_CREATOR) {
+
+		// For this to work, we need the FS creation times.  Is at least one of these set?
+		if( ! hfs->has_root_crtime && ! hfs->has_meta_dir_crtime && ! hfs->has_meta_crtime) {
+			uint32_t linkNum = tsk_getu32(fs->endian, cat->std.perm.special.inum);
+			*is_error = 1;
+
+			tsk_fprintf(stderr, "WARNING: hfs_follow_hard_link: File system creation times are not set. "
+					"Cannot test inode for hard link. File type and creator indicate that this"
+					" is a hard link (directory), with LINK ID = %" PRIu32 "\n", linkNum);
+			return cnid;
+		}
+
+		// Now we need to check the creation time against the three FS creation times
+		if((hfs->has_meta_crtime && crtime == hfs->meta_crtime) ||
+				(hfs->has_meta_dir_crtime && crtime == hfs->metadir_crtime) ||
+				(hfs->has_root_crtime && crtime == hfs->root_crtime)) {
+			// OK, this is a hard link to a directory.
+			uint32_t linkNum = tsk_getu32(fs->endian, cat->std.perm.special.inum);
+			char fNameBuf[50];
+			TSK_INUM_T target_cnid;   //  This is the real CNID of the file.
+			int8_t result;
+
+			memset(fNameBuf, 0, 50);
+			snprintf(fNameBuf, 50, "/.HFS+ Private Directory Data%c/dir_%" PRIu32, (char) 0xD, linkNum);
+			
+			result = tsk_fs_path2inum(fs, fNameBuf, &target_cnid, NULL);
+
+			if(result == 0) {
+				// Succeeded in finding that target_cnid in the Catalog file
+				return target_cnid;
+			} else {
+				// This should be a hard link to a directory, BUT...
+				// Did not find the target_cnid in the Catalog file.
+				printf("  error\n");
+				snprintf(fNameBuf, 50, "/.HFS+ Private Directory Data<CR>/dir_%" PRIu32, linkNum);
+				if(result == -1) {
+					error_returned("hfs_follow_hard_link: error in looking up"
+							" the path %s "
+							"to the link target directory in the Catalog",
+							fNameBuf);
+					*is_error = 2;
+				} else {
+					error_detected(TSK_ERR_FS_CORRUPT,
+							"hfs_follow_hard_link: error, target directory of hard link, with path %s"
+							" does not exist in the filesystem",
+							fNameBuf);
+					*is_error = 3;
+				}
+				return 0;  // because of error
+			}
+		}
+	}
+	// It cannot be a hard link (file or directory)
+	return cnid;
+}
+
+
+
 
 /** \internal
  * Lookup an entry in the catalog file and save it into the entry.  Do not
@@ -1253,8 +1420,9 @@ hfs_cat_read_file_folder_record(HFS_INFO * hfs, TSK_OFF_T off,
  * to differentiate between error and not found.  If it is not found, then the
  * errno will be TSK_ERR_FS_INODE_NUM.  Else, it will be some other value.
  */
-static uint8_t
-hfs_cat_file_lookup(HFS_INFO * hfs, TSK_INUM_T inum, HFS_ENTRY * entry)
+uint8_t
+hfs_cat_file_lookup(HFS_INFO * hfs, TSK_INUM_T inum, HFS_ENTRY * entry,
+		unsigned char follow_hard_link)
 {
     TSK_FS_INFO *fs = (TSK_FS_INFO *) & (hfs->fs_info);
     hfs_btree_key_cat key;      /* current catalog key */
@@ -1381,8 +1549,30 @@ hfs_cat_file_lookup(HFS_INFO * hfs, TSK_INUM_T inum, HFS_ENTRY * entry)
     entry->flags = TSK_FS_META_FLAG_ALLOC | TSK_FS_META_FLAG_USED;
     entry->inum = inum;
 
+    if(follow_hard_link) {
+    	// TEST to see if this is a hard link
+    	unsigned char is_err;
+    	TSK_INUM_T target_cnid = hfs_follow_hard_link(hfs, &(entry->cat), &is_err);
+    	if(is_err > 1) {
+    		error_returned("hfs_cat_file_lookup: error occurred while following a possible hard link for "
+    				"inum (cnid) =  %" PRIuINUM , inum);
+    		return 1;
+    	}
+    	if(target_cnid != inum) {
+    		// This is a hard link, and we have got the cnid of the target file, so look it up.
+    		uint8_t res = hfs_cat_file_lookup(hfs, target_cnid, entry, FALSE);
+    		if(res != 0) {
+    			error_returned("hfs_cat_file_lookup: error occurred while looking up the Catalog entry for "
+    					"the target of inum (cnid) = %" PRIuINUM " target", inum);
+    		}
+    		return 0;
+    	}
+
+    	// Target is NOT a hard link, so fall through to the non-hard link exit.
+    }
+
     if (tsk_verbose)
-        tsk_fprintf(stderr, "hfs_cat_file_lookup exited\n");
+        tsk_fprintf(stderr, "hfs_cat_file_lookup exiting\n");
     return 0;
 }
 
@@ -1525,6 +1715,9 @@ hfs_make_catalog(HFS_INFO * hfs, TSK_FS_FILE * fs_file)
     TSK_FS_INFO *fs = (TSK_FS_INFO *) hfs;
     TSK_FS_ATTR *fs_attr;
     TSK_FS_ATTR_RUN *attr_run;
+	unsigned char dummy1, dummy2;
+    uint64_t dummy3;
+	uint8_t result;
 
     if (tsk_verbose)
         tsk_fprintf(stderr,
@@ -1580,10 +1773,7 @@ hfs_make_catalog(HFS_INFO * hfs, TSK_FS_FILE * fs_file)
         return 1;
     }
 
-    unsigned char dummy1, dummy2;
-    uint64_t dummy3;
-
-    uint8_t result =
+    result =
         hfs_load_extended_attrs(fs_file, &dummy1, &dummy2, &dummy3);
     if (result != 0) {
         tsk_fprintf(stderr,
@@ -1678,6 +1868,9 @@ hfs_make_blockmap(HFS_INFO * hfs, TSK_FS_FILE * fs_file)
     TSK_FS_INFO *fs = (TSK_FS_INFO *) hfs;
     TSK_FS_ATTR *fs_attr;
     TSK_FS_ATTR_RUN *attr_run;
+	unsigned char dummy1, dummy2;
+    uint64_t dummy3;
+	uint8_t result;
 
     if (tsk_verbose)
         tsk_fprintf(stderr,
@@ -1731,10 +1924,9 @@ hfs_make_blockmap(HFS_INFO * hfs, TSK_FS_FILE * fs_file)
         return 1;
     }
 
-    unsigned char dummy1, dummy2;
-    uint64_t dummy3;
+    
 
-    uint8_t result =
+    result =
         hfs_load_extended_attrs(fs_file, &dummy1, &dummy2, &dummy3);
     if (result != 0) {
         tsk_fprintf(stderr,
@@ -1760,6 +1952,9 @@ hfs_make_startfile(HFS_INFO * hfs, TSK_FS_FILE * fs_file)
     TSK_FS_INFO *fs = (TSK_FS_INFO *) hfs;
     TSK_FS_ATTR *fs_attr;
     TSK_FS_ATTR_RUN *attr_run;
+	unsigned char dummy1, dummy2;
+    uint64_t dummy3;
+    uint8_t result;
 
     if (tsk_verbose)
         tsk_fprintf(stderr,
@@ -1813,10 +2008,7 @@ hfs_make_startfile(HFS_INFO * hfs, TSK_FS_FILE * fs_file)
         return 1;
     }
 
-    unsigned char dummy1, dummy2;
-    uint64_t dummy3;
-
-    uint8_t result =
+   result =
         hfs_load_extended_attrs(fs_file, &dummy1, &dummy2, &dummy3);
     if (result != 0) {
         tsk_fprintf(stderr,
@@ -1916,6 +2108,9 @@ static uint8_t
 hfs_make_badblockfile(HFS_INFO * hfs, TSK_FS_FILE * fs_file)
 {
     TSK_FS_ATTR *fs_attr;
+	unsigned char dummy1, dummy2;
+    uint64_t dummy3;
+    uint8_t result;
 
     if (tsk_verbose)
         tsk_fprintf(stderr,
@@ -1966,11 +2161,7 @@ hfs_make_badblockfile(HFS_INFO * hfs, TSK_FS_FILE * fs_file)
     fs_attr->size = fs_file->meta->size;
     fs_attr->nrd.allocsize = fs_file->meta->size;
 
-    unsigned char dummy1, dummy2;
-    uint64_t dummy3;
-    hfs_load_extended_attrs(fs_file, &dummy1, &dummy2, &dummy3);
-
-    uint8_t result =
+    result =
         hfs_load_extended_attrs(fs_file, &dummy1, &dummy2, &dummy3);
     if (result != 0) {
         tsk_fprintf(stderr,
@@ -1986,18 +2177,39 @@ hfs_make_badblockfile(HFS_INFO * hfs, TSK_FS_FILE * fs_file)
 /** \internal
  * Copy the catalog file or folder record entry into a TSK data structure. 
  * @param a_hfs File system being analyzed
- * @param a_entry Catalog record entry 
- * @param a_fs_meta Structure to copy data into
+ * @param a_hfs_entry Catalog record entry (HFS_ENTRY *)
+ * @param a_fs_file Structure to copy data into (TSK_FS_FILE *)
  * Returns 1 on error.
  */
 static uint8_t
-hfs_dinode_copy(HFS_INFO * a_hfs, const hfs_file_folder * a_entry,
-    TSK_FS_META * a_fs_meta)
+hfs_dinode_copy(HFS_INFO * a_hfs, const HFS_ENTRY * a_hfs_entry,
+    TSK_FS_FILE * a_fs_file)
 {
-    const hfs_file_fold_std *std;
-    TSK_FS_INFO *fs = (TSK_FS_INFO *) & a_hfs->fs_info;
-    uint16_t hfsmode;
 
+	// Note, a_hfs_entry->cat is really of type hfs_file.  But, hfs_file_folder is a union
+	// of that type with hfs_folder.  Both of hfs_file and hfs_folder have the same first member.
+	// So, this cast is appropriate.
+	const hfs_file_folder * a_entry = (hfs_file_folder *) &(a_hfs_entry->cat);
+	const hfs_file_fold_std *std;
+	TSK_FS_META * a_fs_meta = a_fs_file->meta;
+	TSK_FS_INFO *fs;
+	uint16_t hfsmode;
+	TSK_INUM_T iStd;  // the inum (or CNID) that occurs in the standard file metadata
+
+	if(a_entry == NULL) {
+		error_detected(TSK_ERR_FS_ARG, "hfs_dinode_copy: a_entry = a_hfs_entry->cat is NULL");
+		return 1;
+	}
+
+    fs = (TSK_FS_INFO *) & a_hfs->fs_info;
+
+
+    // Just a sanity check.  The inum (or cnid) occurs in two places in the
+    // entry data structure.
+    iStd = tsk_getu32(fs->endian, a_entry->file.std.cnid);
+    if(iStd != a_hfs_entry->inum)
+    	tsk_fprintf(stderr,
+    			"WARNING: hfs_dinode_copy:  HFS_ENTRY with conflicting values for inum (or cnid).\n");
 
     if (a_fs_meta == NULL) {
         tsk_error_set_errno(TSK_ERR_FS_ARG);
@@ -2005,7 +2217,7 @@ hfs_dinode_copy(HFS_INFO * a_hfs, const hfs_file_folder * a_entry,
         return 1;
     }
 
-    // both files and folders start of the same
+    // both files and folders start off the same
     std = &(a_entry->file.std);
 
     if (tsk_verbose)
@@ -2024,6 +2236,8 @@ hfs_dinode_copy(HFS_INFO * a_hfs, const hfs_file_folder * a_entry,
     if (a_fs_meta->attr) {
         tsk_fs_attrlist_markunused(a_fs_meta->attr);
     }
+
+    //tsk_fprintf(stderr, "after markunused\n");
 
 
     /* 
@@ -2056,6 +2270,8 @@ hfs_dinode_copy(HFS_INFO * a_hfs, const hfs_file_folder * a_entry,
             "hfs_dinode_copy error: catalog entry is neither file nor folder\n");
         return 1;
     }
+
+    //tsk_fprintf(stderr, "after the type-specific stuff\n");
 
     /*
      * Copy the standard stuff.  
@@ -2102,6 +2318,8 @@ hfs_dinode_copy(HFS_INFO * a_hfs, const hfs_file_folder * a_entry,
     if (std->perm.o_flags & HFS_PERM_OFLAG_COMPRESSED)
         a_fs_meta->flags |= TSK_FS_META_FLAG_COMP;
 
+    //tsk_fprintf(stderr, "after the standard stuff\n");
+
     /* TODO @@@ could fill in name2 with this entry's name and parent inode
        from Catalog entry */
 
@@ -2115,7 +2333,16 @@ hfs_dinode_copy(HFS_INFO * a_hfs, const hfs_file_folder * a_entry,
        }
      */
 
+    // We copy this inum (or cnid) here, because this file *might* have been a hard link.  In
+    // that case, we want to make sure that a_fs_file points consistently to the target of the
+    // link.
 
+    if(a_fs_file->name != NULL) {
+    	//tsk_fprintf(stderr, "name is NOT null, copying the inum\n");
+    	a_fs_file->name->meta_addr = a_fs_meta->addr;
+    }
+
+    //tsk_fprintf(stderr, "Returning\n");
     return 0;
 }
 
@@ -2197,14 +2424,14 @@ hfs_inode_lookup(TSK_FS_INFO * fs, TSK_FS_FILE * a_fs_file,
     }
 
     /* Lookup inode and store it in the HFS structure */
-    if (hfs_cat_file_lookup(hfs, inum, &entry))
+    if (hfs_cat_file_lookup(hfs, inum, &entry, TRUE))
         return 1;
 
     /* Copy the structure in hfs to generic fs_inode */
-    if (hfs_dinode_copy(hfs, (const hfs_file_folder *) &entry.cat,
-            a_fs_file->meta)) {
+    if (hfs_dinode_copy(hfs,  &entry,   a_fs_file)) {
         return 1;
     }
+
 
     return 0;
 }
@@ -2222,7 +2449,22 @@ hfs_attr_walk_special(const TSK_FS_ATTR * fs_attr,
     int flags, TSK_FS_FILE_WALK_CB a_action, void *ptr)
 {
     TSK_FS_INFO *fs;
-    HFS_INFO *hfs;
+	TSK_ENDIAN_ENUM endian;
+	TSK_FS_FILE *fs_file;
+	const TSK_FS_ATTR *rAttr; // resource fork attribute
+	char *rawBuf;  // compressed data
+    char *uncBuf;  // uncompressed data
+	hfs_resource_fork_header rfHeader;
+	int attrReadResult;
+	uint32_t offsetTableOffset;
+	char fourBytes[4];  // Will hold the number of table entries, little endian
+	uint32_t tableSize;  // The number of table entries
+	hfs_resource_fork_header *resHead;
+    uint32_t dataOffset;
+	char *offsetTableData;
+	CMP_OFFSET_ENTRY *offsetTable;
+	size_t indx;  // index for looping over the offset table
+	TSK_OFF_T off = 0;          // the offset in the uncompressed data stream consumed thus far
 
     if (tsk_verbose)
         tsk_fprintf(stderr,
@@ -2251,11 +2493,11 @@ hfs_attr_walk_special(const TSK_FS_ATTR * fs_attr,
     }
 
     fs = fs_attr->fs_file->fs_info;
-    hfs = (HFS_INFO *) fs;
-    TSK_ENDIAN_ENUM endian = fs->endian;
+    //hfs = (HFS_INFO *) fs;
+    endian = fs->endian;
 
     /* This MUST be a compressed attribute     */
-    if (!fs_attr->flags & TSK_FS_ATTR_COMP) {
+    if (!(fs_attr->flags & TSK_FS_ATTR_COMP)) {
         error_detected(TSK_ERR_FS_FWALK,
             "hfs_attr_walk_special: called with non-special attribute: %x",
             fs_attr->flags);
@@ -2264,10 +2506,10 @@ hfs_attr_walk_special(const TSK_FS_ATTR * fs_attr,
 
     /********  Open the Resource Fork ***********/
     // The file
-    TSK_FS_FILE *fs_file = fs_attr->fs_file;
+    fs_file = fs_attr->fs_file;
 
     // find the attribute for the resource fork
-    const TSK_FS_ATTR *rAttr =
+    rAttr =
         tsk_fs_file_attr_get_type(fs_file, TSK_FS_ATTR_TYPE_HFS_DATA,
         HFS_FS_ATTR_ID_RSRC, TRUE);
     if (rAttr == NULL) {
@@ -2277,8 +2519,8 @@ hfs_attr_walk_special(const TSK_FS_ATTR * fs_attr,
     }
 
     // Allocate two buffers of the compression unit size.
-    char *rawBuf = tsk_malloc(COMPRESSION_UNIT_SIZE);
-    char *uncBuf = tsk_malloc(COMPRESSION_UNIT_SIZE);
+    rawBuf = (char *) tsk_malloc(COMPRESSION_UNIT_SIZE);
+    uncBuf = (char *) tsk_malloc(COMPRESSION_UNIT_SIZE);
     if (rawBuf == NULL || uncBuf == NULL) {
         error_returned
             (" hfs_attr_walk_special: buffers for reading and uncompressing");
@@ -2286,11 +2528,9 @@ hfs_attr_walk_special(const TSK_FS_ATTR * fs_attr,
     }
 
     // Read the resource fork header
-    hfs_resource_fork_header rfHeader;
-
-    int result1 = tsk_fs_attr_read(rAttr, 0, (char *) &rfHeader,
+    attrReadResult = tsk_fs_attr_read(rAttr, 0, (char *) &rfHeader,
         sizeof(hfs_resource_fork_header), TSK_FS_FILE_READ_FLAG_NONE);
-    if (result1 != sizeof(hfs_resource_fork_header)) {
+    if (attrReadResult != sizeof(hfs_resource_fork_header)) {
         error_returned
             (" hfs_attr_walk_special: trying to read the resource fork header");
         return 1;
@@ -2301,38 +2541,36 @@ hfs_attr_walk_special(const TSK_FS_ATTR * fs_attr,
     // We are assuming that there is exactly one resource, and that this contains the compressed
     // data.  This assumption is true in all examples we have seen.  More general code would
     // parse the Resource Fork map, and find the appropriate entry, then jump to THAT data offset.
-    hfs_resource_fork_header *resHead = &rfHeader;
-    uint32_t dataOffset = tsk_getu32(endian, resHead->dataOffset);
+    resHead = &rfHeader;
+    dataOffset = tsk_getu32(endian, resHead->dataOffset);
     //uint32_t mapOffset = tsk_getu32(endian, resHead->mapOffset);
     //uint32_t dataLength = tsk_getu32(endian, resHead->dataLength);
     //uint32_t mapLength = tsk_getu32(endian, resHead->mapLength);
 
 
     // Read in the offset table
-    uint32_t offsetTableOffset = dataOffset + 4;
+    offsetTableOffset = dataOffset + 4;
 
     // read 4 bytes, the number of table entries, little endian
-    char fourBytes[4];
-
-    result1 =
+    attrReadResult =
         tsk_fs_attr_read(rAttr, offsetTableOffset, fourBytes, 4,
         TSK_FS_FILE_READ_FLAG_NONE);
-    if (result1 != 4) {
+    if (attrReadResult != 4) {
         error_returned
             (" hfs_attr_walk_special: trying to read the offset table size, "
-            "return value of %u should have been 4", result1);
+            "return value of %u should have been 4", attrReadResult);
         return 1;
     }
-    uint32_t tableSize = tsk_getu32(TSK_LIT_ENDIAN, fourBytes);
+    tableSize = tsk_getu32(TSK_LIT_ENDIAN, fourBytes);
 
     // Each table entry is 8 bytes long
-    char *offsetTableData = tsk_malloc(tableSize * 8);
+    offsetTableData = (char *) tsk_malloc(tableSize * 8);
     if (offsetTableData == NULL) {
         error_returned
             (" hfs_attr_walk_special: space for the offset table raw data");
         return 1;
     }
-    CMP_OFFSET_ENTRY *offsetTable =
+    offsetTable =
         (CMP_OFFSET_ENTRY *) tsk_malloc(tableSize *
         sizeof(CMP_OFFSET_ENTRY));
     if (offsetTable == NULL) {
@@ -2342,18 +2580,17 @@ hfs_attr_walk_special(const TSK_FS_ATTR * fs_attr,
         return 1;
     }
 
-    result1 = tsk_fs_attr_read(rAttr, offsetTableOffset + 4,
+    attrReadResult = tsk_fs_attr_read(rAttr, offsetTableOffset + 4,
         offsetTableData, tableSize * 8, TSK_FS_FILE_READ_FLAG_NONE);
-    if (result1 != tableSize * 8) {
+    if (attrReadResult != tableSize * 8) {
         error_returned
             (" hfs_attr_walk_special: reading in the compression offset table, "
-            "return value %u should have been %u", result1, tableSize * 8);
+            "return value %u should have been %u", attrReadResult, tableSize * 8);
         free(offsetTableData);
         free(offsetTable);
         return 1;
     }
 
-    int indx;
     for (indx = 0; indx < tableSize; indx++) {
         offsetTable[indx].offset =
             tsk_getu32(TSK_LIT_ENDIAN, offsetTableData + indx * 8);
@@ -2361,12 +2598,17 @@ hfs_attr_walk_special(const TSK_FS_ATTR * fs_attr,
             tsk_getu32(TSK_LIT_ENDIAN, offsetTableData + indx * 8 + 4);
     }
 
-    TSK_OFF_T off = 0;          // the offset in the uncompressed data stream consumed thus far
-
     // FOR entry in the table DO
     for (indx = 0; indx < tableSize; indx++) {
         uint32_t offset = offsetTableOffset + offsetTable[indx].offset;
         uint32_t len = offsetTable[indx].length;
+		uint64_t uncLen;   // uncompressed length
+        unsigned long bytesConsumed;
+        int infResult;
+		unsigned int blockSize;
+        uint64_t lumpSize;
+        uint64_t remaining;
+        char *lumpStart;
 
         if (tsk_verbose)
             tsk_fprintf(stderr,
@@ -2374,17 +2616,17 @@ hfs_attr_walk_special(const TSK_FS_ATTR * fs_attr,
                 indx);
 
         // Read in the chunk of compressed data
-        result1 = tsk_fs_attr_read(rAttr, offset,
+        attrReadResult = tsk_fs_attr_read(rAttr, offset,
             rawBuf, len, TSK_FS_FILE_READ_FLAG_NONE);
-        if (result1 != len) {
-            if (result1 < 0)
+        if (attrReadResult != len) {
+            if (attrReadResult < 0)
                 error_returned
                     (" hfs_attr_walk_special: reading in the compression offset table, "
-                    "return value %u should have been %u", result1, len);
+                    "return value %u should have been %u", attrReadResult, len);
             else
                 error_detected(TSK_ERR_FS_READ,
                     "hfs_attr_walk_special: reading in the compression offset table, "
-                    "return value %u should have been %u", result1, len);
+                    "return value %u should have been %u", attrReadResult, len);
             free(offsetTableData);
             free(offsetTable);
             return 1;
@@ -2394,9 +2636,7 @@ hfs_attr_walk_special(const TSK_FS_ATTR * fs_attr,
         if (tsk_verbose)
             tsk_fprintf(stderr,
                 "hfs_attr_walk_special: Inflating the compression unit\n");
-        uint64_t uncLen;
-        unsigned long bytesConsumed;
-        int infResult = zlib_inflate(rawBuf, (uint64_t) len,
+        infResult = zlib_inflate(rawBuf, (uint64_t) len,
             uncBuf, (uint64_t) COMPRESSION_UNIT_SIZE,
             &uncLen, &bytesConsumed);
         if (infResult != 0) {
@@ -2409,31 +2649,33 @@ hfs_attr_walk_special(const TSK_FS_ATTR * fs_attr,
         }
 
         // Call the a_action callback with "Lumps" that are at most the block size.
-        unsigned int blockSize = fs->block_size;
-        uint64_t lumpSize;
-        uint64_t remaining = uncLen;
-        char *lumpStart = uncBuf;
+        blockSize = fs->block_size;
+        remaining = uncLen;
+        lumpStart = uncBuf;
 
         while (remaining > 0) {
-
+			int retval;  // action return value
             if (remaining <= blockSize)
                 lumpSize = remaining;
             else
                 lumpSize = blockSize;
 
-            //fprintf(stdout, "  uncLen = %llu bytesConsumed = %u\n", uncLen, bytesConsumed);
-            //fflush(stdout);
             // Apply the callback function
             if (tsk_verbose)
                 tsk_fprintf(stderr,
                     "hfs_attr_walk_special: Calling action on lump of size %"
                     PRIu64 " offset %" PRIu64 " in the compression unit\n",
                     lumpSize, uncLen - remaining);
-            int retval = a_action(fs_attr->fs_file, off, 0,
-                lumpStart, lumpSize,
+			if(lumpSize > SIZE_MAX) {
+				error_detected(TSK_ERR_FS_FWALK,
+                " hfs_attr_walk_special: lumpSize is too large for the action");
+				free(offsetTableData);
+				free(offsetTable);
+				return 1;
+			}
+            retval = a_action(fs_attr->fs_file, off, 0,
+                lumpStart, (size_t) lumpSize,   // cast OK because of above test
                 TSK_FS_BLOCK_FLAG_COMP, ptr);
-            //fprintf(stdout, "Returned from the callback function, ret = %d\n", retval);
-            //fflush(stdout);
 
             if (retval == TSK_WALK_ERROR) {
                 error_detected(TSK_ERR_FS | 201,
@@ -2467,15 +2709,48 @@ ssize_t
 hfs_file_read_special(const TSK_FS_ATTR * a_fs_attr,
     TSK_OFF_T a_offset, char *a_buf, size_t a_len)
 {
+	TSK_FS_INFO *fs = NULL;
+	TSK_ENDIAN_ENUM endian;
+	TSK_FS_FILE *fs_file;
+	const TSK_FS_ATTR *rAttr;
+	char * rawBuf;
+	char * uncBuf;
+	hfs_resource_fork_header rfHeader;
+	int attrReadResult;
+	hfs_resource_fork_header *resHead;
+    uint32_t dataOffset;
+	uint32_t offsetTableOffset;
+	char fourBytes[4];  // Size of the offset table, little endian
+	uint32_t tableSize;  // Size of the offset table
+	char *offsetTableData;
+	CMP_OFFSET_ENTRY *offsetTable;
+	size_t indx;  // index for looping over the offset table
+	uint64_t sizeUpperBound;
+	uint64_t cummulativeSize = 0;
+    uint32_t startUnit = 0;
+    uint32_t startUnitOffset = 0;
+    uint32_t endUnit = 0;
+	uint64_t bytesCopied;
+
     if (tsk_verbose)
         tsk_fprintf(stderr,
             "hfs_file_read_special: called because this file is compressed, with data in the resource fork\n");
-    TSK_FS_INFO *fs = NULL;
-    HFS_INFO *hfs = NULL;
 
     // Reading zero bytes?  OK at any offset, I say!
     if (a_len == 0)
         return 0;
+
+	if(a_offset < 0 || a_len < 0) {
+		error_detected(TSK_ERR_FS_ARG,
+            "hfs_file_read_special: reading from file at a negative offset, or negative length");
+		return -1;
+	}
+
+	if(a_len > SIZE_MAX/2) {
+		error_detected(TSK_ERR_FS_ARG,
+            "hfs_file_read_special: trying to read more than SIZE_MAX/2 is not supported.");
+		return -1;
+	}
 
     if ((a_fs_attr == NULL) || (a_fs_attr->fs_file == NULL)
         || (a_fs_attr->fs_file->meta == NULL)
@@ -2486,11 +2761,11 @@ hfs_file_read_special(const TSK_FS_ATTR * a_fs_attr,
     }
 
     fs = a_fs_attr->fs_file->fs_info;
-    hfs = (HFS_INFO *) fs;
-    TSK_ENDIAN_ENUM endian = fs->endian;
+    //hfs = (HFS_INFO *) fs;
+    endian = fs->endian;
 
     // This should be a compressed file.  If not, that's an error!
-    if (!a_fs_attr->flags & TSK_FS_ATTR_COMP) {
+    if (!(a_fs_attr->flags & TSK_FS_ATTR_COMP)) {
         error_detected(TSK_ERR_FS_ARG,
             "hfs_file_read_special: called with non-special attribute: %x",
             a_fs_attr->flags);
@@ -2510,10 +2785,10 @@ hfs_file_read_special(const TSK_FS_ATTR * a_fs_attr,
 
     /********  Open the Resource Fork ***********/
     // The file
-    TSK_FS_FILE *fs_file = a_fs_attr->fs_file;
+    fs_file = a_fs_attr->fs_file;
 
     // find the attribute for the resource fork
-    const TSK_FS_ATTR *rAttr =
+    rAttr =
         tsk_fs_file_attr_get_type(fs_file, TSK_FS_ATTR_TYPE_HFS_DATA,
         HFS_FS_ATTR_ID_RSRC, TRUE);
     if (rAttr == NULL) {
@@ -2523,13 +2798,13 @@ hfs_file_read_special(const TSK_FS_ATTR * a_fs_attr,
     }
 
     // Allocate two buffers of the compression unit size.
-    char *rawBuf = tsk_malloc(COMPRESSION_UNIT_SIZE);
+    rawBuf = (char *) tsk_malloc(COMPRESSION_UNIT_SIZE);
     if (rawBuf == NULL) {
         error_returned
             (" hfs_file_read_special: buffers for reading and uncompressing");
         return -1;
     }
-    char *uncBuf = tsk_malloc(COMPRESSION_UNIT_SIZE);
+    uncBuf = (char *) tsk_malloc(COMPRESSION_UNIT_SIZE);
     if (uncBuf == NULL) {
         error_returned
             (" hfs_file_read_special: buffers for reading and uncompressing");
@@ -2538,11 +2813,9 @@ hfs_file_read_special(const TSK_FS_ATTR * a_fs_attr,
     }
 
     // Read the resource fork header
-    hfs_resource_fork_header rfHeader;
-
-    int result1 = tsk_fs_attr_read(rAttr, 0, (char *) &rfHeader,
+    attrReadResult = tsk_fs_attr_read(rAttr, 0, (char *) &rfHeader,
         sizeof(hfs_resource_fork_header), TSK_FS_FILE_READ_FLAG_NONE);
-    if (result1 != sizeof(hfs_resource_fork_header)) {
+    if (attrReadResult != sizeof(hfs_resource_fork_header)) {
         error_returned
             (" hfs_file_read_special: trying to read the resource fork header");
         free(rawBuf);
@@ -2552,34 +2825,32 @@ hfs_file_read_special(const TSK_FS_ATTR * a_fs_attr,
 
     // Begin to parse the resource fork.  For now, we just need the data offset.  But
     // eventually we'll want the other quantities as well.
-    hfs_resource_fork_header *resHead = &rfHeader;
-    uint32_t dataOffset = tsk_getu32(endian, resHead->dataOffset);
+    resHead = &rfHeader;
+    dataOffset = tsk_getu32(endian, resHead->dataOffset);
     //uint32_t mapOffset = tsk_getu32(endian, resHead->mapOffset);
     //uint32_t dataLength = tsk_getu32(endian, resHead->dataLength);
     //uint32_t mapLength = tsk_getu32(endian, resHead->mapLength);
 
 
     // Read in the offset table
-    uint32_t offsetTableOffset = dataOffset + 4;
+    offsetTableOffset = dataOffset + 4;
 
     // read 4 bytes, the number of table entries, little endian
-    char fourBytes[4];
-
-    result1 =
+    attrReadResult =
         tsk_fs_attr_read(rAttr, offsetTableOffset, fourBytes, 4,
         TSK_FS_FILE_READ_FLAG_NONE);
-    if (result1 != 4) {
+    if (attrReadResult != 4) {
         error_returned
             (" hfs_file_read_special: trying to read the offset table size, "
-            "return value of %u should have been 4", result1);
+            "return value of %u should have been 4", attrReadResult);
         free(rawBuf);
         free(uncBuf);
         return -1;
     }
-    uint32_t tableSize = tsk_getu32(TSK_LIT_ENDIAN, fourBytes);
+    tableSize = tsk_getu32(TSK_LIT_ENDIAN, fourBytes);
 
     // Each table entry is 8 bytes long
-    char *offsetTableData = tsk_malloc(tableSize * 8);
+    offsetTableData = tsk_malloc(tableSize * 8);
     if (offsetTableData == NULL) {
         error_returned
             (" hfs_file_read_special: space for the offset table raw data");
@@ -2587,7 +2858,7 @@ hfs_file_read_special(const TSK_FS_ATTR * a_fs_attr,
         free(uncBuf);
         return -1;
     }
-    CMP_OFFSET_ENTRY *offsetTable =
+    offsetTable =
         (CMP_OFFSET_ENTRY *) tsk_malloc(tableSize *
         sizeof(CMP_OFFSET_ENTRY));
     if (offsetTable == NULL) {
@@ -2599,12 +2870,12 @@ hfs_file_read_special(const TSK_FS_ATTR * a_fs_attr,
         return -1;
     }
 
-    result1 = tsk_fs_attr_read(rAttr, offsetTableOffset + 4,
+    attrReadResult = tsk_fs_attr_read(rAttr, offsetTableOffset + 4,
         offsetTableData, tableSize * 8, TSK_FS_FILE_READ_FLAG_NONE);
-    if (result1 != tableSize * 8) {
+    if (attrReadResult != tableSize * 8) {
         error_returned
             (" hfs_file_read_special: reading in the compression offset table, "
-            "return value %u should have been %u", result1, tableSize * 8);
+            "return value %u should have been %u", attrReadResult, tableSize * 8);
         free(offsetTableData);
         free(offsetTable);
         free(rawBuf);
@@ -2612,7 +2883,6 @@ hfs_file_read_special(const TSK_FS_ATTR * a_fs_attr,
         return -1;
     }
 
-    int indx;
     for (indx = 0; indx < tableSize; indx++) {
         offsetTable[indx].offset =
             tsk_getu32(TSK_LIT_ENDIAN, offsetTableData + indx * 8);
@@ -2620,9 +2890,10 @@ hfs_file_read_special(const TSK_FS_ATTR * a_fs_attr,
             tsk_getu32(TSK_LIT_ENDIAN, offsetTableData + indx * 8 + 4);
     }
 
-    uint64_t sizeUpperBound = tableSize * COMPRESSION_UNIT_SIZE;
+    sizeUpperBound = tableSize * COMPRESSION_UNIT_SIZE;
 
-    if (a_offset + a_len > sizeUpperBound) {
+	// cast is OK because both a_offset and a_len are >= 0
+    if ((uint64_t) (a_offset + a_len) > sizeUpperBound) {
         error_detected(TSK_ERR_FS_ARG,
             "hfs_file_read_special: range of bytes requested %lld - %lld falls outside of the length upper bound of the uncompressed stream %llu\n",
             a_offset, a_offset + a_len, sizeUpperBound);
@@ -2633,21 +2904,17 @@ hfs_file_read_special(const TSK_FS_ATTR * a_fs_attr,
         return -1;
     }
 
-    uint64_t cummulativeSize = 0;
-    uint32_t startUnit = 0;
-    uint32_t startUnitOffset = 0;
-    uint32_t endUnit = 0;
-
     // Compute the range of compression units needed for the request
     for (indx = 0; indx < tableSize; indx++) {
-        if (cummulativeSize <= a_offset &&
-            (cummulativeSize + COMPRESSION_UNIT_SIZE > a_offset)) {
+        if (cummulativeSize <= (uint64_t) a_offset &&  // casts OK because a_offset >= 0
+            (cummulativeSize + COMPRESSION_UNIT_SIZE > (uint64_t) a_offset)) {
             startUnit = indx;
-            startUnitOffset = a_offset - cummulativeSize;
+            startUnitOffset = (uint32_t) (a_offset - cummulativeSize); // This cast is OK, result can't be too large,
+			                                                           // due to enclosing test.
         }
 
-        if ((cummulativeSize < a_offset + a_len) &&
-            (cummulativeSize + COMPRESSION_UNIT_SIZE >= a_offset + a_len)) {
+        if ((cummulativeSize < (uint64_t) (a_offset + a_len)) &&  // casts OK because a_offset and a_len > 0
+            (cummulativeSize + COMPRESSION_UNIT_SIZE >= (uint64_t) (a_offset + a_len))) {
             endUnit = indx;
         }
         cummulativeSize += COMPRESSION_UNIT_SIZE;
@@ -2657,12 +2924,17 @@ hfs_file_read_special(const TSK_FS_ATTR * a_fs_attr,
         tsk_fprintf(stderr,
             "hfs_file_read_special: reading compression units: %" PRIu32
             " to %" PRIu32 "\n", startUnit, endUnit);
-    uint64_t bytesCopied = 0;
+    bytesCopied = 0;
 
     // Read from the indicated comp units
     for (indx = startUnit; indx <= endUnit; indx++) {
         uint32_t offset = offsetTableOffset + offsetTable[indx].offset;
         uint32_t len = offsetTable[indx].length;
+		uint64_t uncLen;
+        unsigned long bytesConsumed;
+        char *uncBufPtr = uncBuf;
+		int infResult;
+		size_t bytesToCopy;
 
         if (tsk_verbose)
             tsk_fprintf(stderr,
@@ -2670,17 +2942,17 @@ hfs_file_read_special(const TSK_FS_ATTR * a_fs_attr,
                 "\n", indx);
 
         // Read in the chunk of compressed data
-        result1 = tsk_fs_attr_read(rAttr, offset,
+        attrReadResult = tsk_fs_attr_read(rAttr, offset,
             rawBuf, len, TSK_FS_FILE_READ_FLAG_NONE);
-        if (result1 != len) {
-            if (result1 < 0)
+        if (attrReadResult != len) {
+            if (attrReadResult < 0)
                 error_returned
                     (" hfs_file_read_special: reading in the compression offset table, "
-                    "return value %u should have been %u", result1, len);
+                    "return value %u should have been %u", attrReadResult, len);
             else
                 error_detected(TSK_ERR_FS_READ,
                     "hfs_file_read_special: reading in the compression offset table, "
-                    "return value %u should have been %u", result1, len);
+                    "return value %u should have been %u", attrReadResult, len);
             free(offsetTableData);
             free(offsetTable);
             free(rawBuf);
@@ -2692,11 +2964,9 @@ hfs_file_read_special(const TSK_FS_ATTR * a_fs_attr,
         if (tsk_verbose)
             tsk_fprintf(stderr,
                 "hfs_file_read_special: Inflating the compression unit\n");
-        uint64_t uncLen;
-        unsigned long bytesConsumed;
-        char *uncBufPtr = uncBuf;
+        
 
-        int infResult = zlib_inflate(rawBuf, (uint64_t) len,
+        infResult = zlib_inflate(rawBuf, (uint64_t) len,
             uncBufPtr, (uint64_t) COMPRESSION_UNIT_SIZE,
             &uncLen, &bytesConsumed);
         if (infResult != 0) {
@@ -2719,11 +2989,11 @@ hfs_file_read_special(const TSK_FS_ATTR * a_fs_attr,
         }
 
         // How many bytes to copy from this compression unit?
-        size_t bytesToCopy;
-        if (bytesCopied + uncLen < a_len)
-            bytesToCopy = uncLen;
+      
+        if (bytesCopied + uncLen < (uint64_t) a_len)   // cast OK because a_len > 0
+            bytesToCopy = (size_t) uncLen;  // uncLen <= size of compression unit, which is small, so cast is OK
         else
-            bytesToCopy = a_len - bytesCopied;
+            bytesToCopy = (size_t) (((uint64_t) a_len) - bytesCopied);  // diff <= compression unit size, so cast is OK
 
         // Copy into the output buffer, and update bookkeeping.
         memcpy(a_buf + bytesCopied, uncBufPtr, bytesToCopy);
@@ -2738,17 +3008,18 @@ hfs_file_read_special(const TSK_FS_ATTR * a_fs_attr,
     // the last compression unit with zeros.
 
     // Have we read and copied all of the bytes requested?
-    if (bytesCopied < a_len)
+    if (bytesCopied < a_len) {
         // set the remaining bytes to zero
-        memset(a_buf + bytesCopied, 0, a_len - bytesCopied);
+        memset(a_buf + bytesCopied, 0, a_len - (size_t) bytesCopied); // cast OK because diff must be < compression unit size
+	}
 
     free(offsetTableData);
     free(offsetTable);
     free(rawBuf);
     free(uncBuf);
 
-    return bytesCopied;
-
+    return (ssize_t) bytesCopied;  // cast OK, cannot be greater than a_len which cannot be
+	                               // greater than SIZE_MAX/2 (rounded down).
 }
 
 #endif
@@ -2902,13 +3173,22 @@ hfs_load_extended_attrs(TSK_FS_FILE * fs_file,
     unsigned char *isCompressed, unsigned char *compDataInRSRC,
     uint64_t * uncompressedSize)
 {
-    tsk_error_reset();
+	TSK_FS_INFO *fs = fs_file->fs_info;
+	uint64_t fileID;
+	ATTR_FILE_T attrFile;
+	int cnt;                    // count of chars read from file.
+	uint8_t *nodeData;
+	TSK_ENDIAN_ENUM endian;
+    hfs_btree_node *nodeDescriptor;  // The node descriptor
+    uint32_t nodeID;            // The number or ID of the Attributes file node to read.
+    hfs_btree_key_attr *keyB;   // ptr to the key of the Attr file record.
+	unsigned char done; // Flag to indicate that we are done looping over leaf nodes
 
-    TSK_FS_INFO *fs = fs_file->fs_info;
+	tsk_error_reset();
 
     // The CNID (or inode number) of the file
     //  Note that in TSK such numbers are 64 bits, but in HFS+ they are only 32 bits.
-    uint64_t fileID = fs_file->meta->addr;
+    fileID = fs_file->meta->addr;
 
     if (fs == NULL) {
         error_detected(TSK_ERR_FS_ARG,
@@ -2923,14 +3203,14 @@ hfs_load_extended_attrs(TSK_FS_FILE * fs_file,
 
 
     // Open the Attributes File
-    ATTR_FILE_T attrFile;
+
     if (open_attr_file(fs, &attrFile)) {
         error_returned
             ("hfs_load_extended_attrs: could not open Attributes file");
         return 1;
     }
 
-    int cnt;                    // count of chars read from file.
+   
 
     // Is the Attributes file empty?
     if (attrFile.rootNode == 0) {
@@ -2944,7 +3224,7 @@ hfs_load_extended_attrs(TSK_FS_FILE * fs_file,
     }
 
     // A place to hold one node worth of data
-    uint8_t *nodeData = (uint8_t *) malloc(attrFile.nodeSize);
+    nodeData = (uint8_t *) malloc(attrFile.nodeSize);
     if (nodeData == NULL) {
         error_detected(TSK_ERR_AUX_MALLOC,
             "hfs_load_extended_attrs: Could not malloc space for an Attributes file node");
@@ -2956,14 +3236,9 @@ hfs_load_extended_attrs(TSK_FS_FILE * fs_file,
     *isCompressed = FALSE;
     *compDataInRSRC = FALSE;
 
-    TSK_ENDIAN_ENUM endian = attrFile.fs->endian;
+    endian = attrFile.fs->endian;
 
-    // The node descriptor
-    hfs_btree_node *nodeDescriptor;
-
-    uint32_t nodeID;            // The number or ID of the Attributes file node to read.
-
-    hfs_btree_key_attr *keyB;   // ptr to the key of the Attr file record.
+    
 
 
     // Start with the root node
@@ -2971,6 +3246,9 @@ hfs_load_extended_attrs(TSK_FS_FILE * fs_file,
 
     // While loop, over nodes in path from root node to the correct LEAF node.
     while (1) {
+		uint16_t numRec;  // Number of records in the node
+		int recIndx;      // index for looping over records
+
         if (tsk_verbose) {
             tsk_fprintf(stderr,
                 "hfs_load_extended_attrs: Reading Attributes File n ode with ID %"
@@ -3009,7 +3287,7 @@ hfs_load_extended_attrs(TSK_FS_FILE * fs_file,
         // OK, we are in an INDEX node.  loop over the records to find the last one whose key is
         // smaller than or equal to the desired key
 
-        uint16_t numRec = tsk_getu16(endian, nodeDescriptor->num_rec);
+        numRec = tsk_getu16(endian, nodeDescriptor->num_rec);
 
         if (numRec == 0) {
             // This is wrong, there must always be at least 1 record in an INDEX node.
@@ -3021,9 +3299,14 @@ hfs_load_extended_attrs(TSK_FS_FILE * fs_file,
             return 1;
         }
 
-
-        int recIndx;
         for (recIndx = 0; recIndx < numRec; recIndx++) {
+			uint16_t keyLength;
+			int comp;  // comparison result
+            char *compStr;  // comparison result, as a string
+			uint8_t *recData;   // pointer to the data part of the record
+			uint32_t keyFileID;  
+			int diff;   // difference in bytes between the record start and the record data
+
             // Offset of the record
             uint8_t *recOffsetData = &nodeData[attrFile.nodeSize - 2 * (recIndx + 1)];  // data describing where this record is
             uint16_t recOffset = tsk_getu16(endian, recOffsetData);
@@ -3035,14 +3318,12 @@ hfs_load_extended_attrs(TSK_FS_FILE * fs_file,
 
             // Cast that to the Attributes file key (n.b., the key is the first thing in the record)
             keyB = (hfs_btree_key_attr *) record;
-            uint16_t keyLength = tsk_getu16(endian, keyB->key_len);
+            keyLength = tsk_getu16(endian, keyB->key_len);
 
             // Is this key less than what we are seeking?
             //int comp = comp_attr_key(endian, keyB, fileID, attrName, startBlock);
-            int comp;
-            char *compStr;
 
-            uint32_t keyFileID = tsk_getu32(endian, keyB->file_id);
+            keyFileID = tsk_getu32(endian, keyB->file_id);
             if (keyFileID < fileID) {
                 comp = -1;
                 compStr = "less than";
@@ -3082,14 +3363,12 @@ hfs_load_extended_attrs(TSK_FS_FILE * fs_file,
 
 
             // Extract the child node ID from the data of the record
-            uint8_t *recData;   // pointer to the data part of the record
-
             recData = &record[keyLength + 2];   // This is +2 because key_len does not include the
             // length of the key_len field itself.
 
             // Data must start on an even offset from the beginning of the record.
             // So, correct this if needed.
-            int diff = recData - record;
+            diff = recData - record;
             if (2 * (diff / 2) != diff) {
                 recData += 1;
             }
@@ -3114,37 +3393,37 @@ hfs_load_extended_attrs(TSK_FS_FILE * fs_file,
     // and nodeDescriptor points to the descriptor of that node.
 
     // Loop over successive LEAF nodes, starting with this one
-    unsigned char done = FALSE;
+    done = FALSE;
     while (!done) {
+		uint16_t numRec;  // number of records
+		int recIndx;  // index for looping over records
 
         if (tsk_verbose)
             tsk_fprintf(stderr,
                 "hfs_load_extended_attrs: Attributes File LEAF Node %"
                 PRIu32 ".\n", nodeID);
-        uint16_t numRec = tsk_getu16(endian, nodeDescriptor->num_rec);
+        numRec = tsk_getu16(endian, nodeDescriptor->num_rec);
         // Note, leaf node could have one (or maybe zero) records
 
         // Loop over the records in this node
-        int recIndx;
         for (recIndx = 0; recIndx < numRec; recIndx++) {
             // Offset of the record
             uint8_t *recOffsetData = &nodeData[attrFile.nodeSize - 2 * (recIndx + 1)];  // data describing where this record is
             uint16_t recOffset = tsk_getu16(endian, recOffsetData);
-            //uint8_t * nextRecOffsetData = &nodeData[attrFile.nodeSize - 2* (recIndx+2)];
-            //uint16_t nextRecOffset = tsk_getu16(endian, nextRecOffsetData);
-
+			uint16_t keyLength;
+			int comp;  // comparison result
+            char *compStr;  // comparison result as a string
+			uint32_t keyFileID;
 
             // Pointer to first byte of record
             uint8_t *record = &nodeData[recOffset];
 
             // Cast that to the Attributes file key
             keyB = (hfs_btree_key_attr *) record;
-            uint16_t keyLength = tsk_getu16(endian, keyB->key_len);
+            keyLength = tsk_getu16(endian, keyB->key_len);
 
             // Compare record key to the key that we are seeking
-            int comp;
-            char *compStr;
-            uint32_t keyFileID = tsk_getu32(endian, keyB->file_id);
+            keyFileID = tsk_getu32(endian, keyB->file_id);
 
             //fprintf(stdout, " Key file ID = %lu\n", keyFileID);
             if (keyFileID < fileID) {
@@ -3170,18 +3449,30 @@ hfs_load_extended_attrs(TSK_FS_FILE * fs_file,
                 // Yes, so load this attribute
 
                 uint8_t *recData;       // pointer to the data part of the record
-                recData = &record[keyLength + 2];
+				hfs_attr_data *attrData;
+				uint32_t attributeLength;
+				int diff;  // Difference in bytes between the start of the record and the start of data.
+				char *buffer;  // buffer to hold the attribute
+
+				int conversionResult;
+                char nameBuff[MAX_ATTR_NAME_LENGTH];
+			
+				TSK_FS_ATTR_TYPE_ENUM attrType;
+
+				TSK_FS_ATTR *fs_attr;  // Points to the attribute to be loaded.
+
+				recData = &record[keyLength + 2];
 
                 // Data must start on an even offset from the beginning of the record.
                 // So, correct this if needed.
-                int diff = recData - record;
+                diff = recData - record;
                 if (2 * (diff / 2) != diff) {
                     recData += 1;
                 }
 
                 // Now this should be a "inline data" kind of record.  The other two kinds are not
                 // used for anything, and are not handled in this code.
-                hfs_attr_data *attrData = (hfs_attr_data *) recData;
+                attrData = (hfs_attr_data *) recData;
                 if (tsk_getu32(endian,
                         attrData->record_type) !=
                     HFS_ATTR_RECORD_INLINE_DATA) {
@@ -3192,11 +3483,10 @@ hfs_load_extended_attrs(TSK_FS_FILE * fs_file,
                     return 1;
                 }
 
-                uint32_t attributeLength;
                 // This is the length of the useful data, not including the record header
                 attributeLength = tsk_getu32(endian, attrData->attr_size);
 
-                char *buffer = malloc(attributeLength);
+                buffer = malloc(attributeLength);
                 if (buffer == NULL) {
                     error_detected(TSK_ERR_AUX_MALLOC,
                         "hfs_load_extended_attrs: Could not malloc space for the attribute.");
@@ -3214,14 +3504,10 @@ hfs_load_extended_attrs(TSK_FS_FILE * fs_file,
                 // it will be is 3 * the max number of UTF16 code units.  Add one for null
                 // termination.   (thanks Judson!)
 
-                const int maxAttrNameLen = 127 * 3 + 1; // 382
-
-                char nameBuff[maxAttrNameLen];
-
-                int r = hfs_UTF16toUTF8(fs, keyB->attr_name,
+                conversionResult = hfs_UTF16toUTF8(fs, keyB->attr_name,
                     tsk_getu16(endian, keyB->attr_name_len),
-                    nameBuff, maxAttrNameLen, 0);
-                if (r != 0) {
+                    nameBuff, MAX_ATTR_NAME_LENGTH, 0);
+                if (conversionResult != 0) {
                     error_returned
                         ("-- hfs_load_extended_attrs could not convert the attr_name in the btree key into a UTF8 attribute name");
                     free(nodeData);
@@ -3232,15 +3518,8 @@ hfs_load_extended_attrs(TSK_FS_FILE * fs_file,
 
                 // What is the type of this attribute?  If it is a compression record, then
                 // use TSK_FS_ATTR_TYPE_HFS_COMP_REC.  Else, use TSK_FS_ATTR_TYPE_HFS_EXT_ATTR
-
-                TSK_FS_ATTR_TYPE_ENUM attrType;
                 if (strcmp(nameBuff, "com.apple.decmpfs") == 0) {
-                    if (tsk_verbose)
-                        tsk_fprintf(stderr,
-                            "hfs_load_extended_attrs: This attribute is a compression record.\n");
-                    attrType = TSK_FS_ATTR_TYPE_HFS_COMP_REC;
-                    *isCompressed = TRUE;       // The data is governed by a compression record (but might not be compressed)
-                    // Now, look at the compression record
+					// Now, look at the compression record
                     DECMPFS_DISK_HEADER *cmph =
                         (DECMPFS_DISK_HEADER *) buffer;
                     uint32_t cmpType =
@@ -3248,16 +3527,23 @@ hfs_load_extended_attrs(TSK_FS_FILE * fs_file,
                     uint64_t uncSize =
                         tsk_getu64(TSK_LIT_ENDIAN,
                         cmph->uncompressed_size);
+
+                    if (tsk_verbose)
+                        tsk_fprintf(stderr,
+                            "hfs_load_extended_attrs: This attribute is a compression record.\n");
+                    
+					attrType = TSK_FS_ATTR_TYPE_HFS_COMP_REC;
+                    *isCompressed = TRUE;       // The data is governed by a compression record (but might not be compressed)
                     *uncompressedSize = uncSize;
-                    unsigned char reallyCompressed;
-                    uint64_t cmpSize = 0;
+                    
                     if (cmpType == 3) {
                         // Data is inline.  We will load the uncompressed data as a resident attribute.
+
+						TSK_FS_ATTR *fs_attr_unc;
+
                         if (tsk_verbose)
                             tsk_fprintf(stderr,
                                 "hfs_load_extended_attrs: Compressed data is inline in the attribute, will load this as the default DATA attribute.\n");
-                        // Need an FS_ATTR:
-                        TSK_FS_ATTR *fs_attr_unc;
 
                         if (attributeLength <= 16)
                             tsk_fprintf(stderr,
@@ -3280,8 +3566,8 @@ hfs_load_extended_attrs(TSK_FS_FILE * fs_file,
                                     tsk_fprintf(stderr,
                                         "hfs_load_extended_attrs: Leading byte, 0x0F, indicates that the data is not really compressed.\n"
                                         "hfs_load_extended_attrs:  Loading the default DATA attribute.");
-                                reallyCompressed = FALSE;
-                                cmpSize = attributeLength - 17; // subtr. size of header + 1 indicator byte
+                                //reallyCompressed = FALSE;
+                                //cmpSize = attributeLength - 17; // subtr. size of header + 1 indicator byte
 
                                 // Load the remainder of the attribute as 128-0
                                 // set the details in the fs_attr structure.  Note, we are loading this
@@ -3301,14 +3587,20 @@ hfs_load_extended_attrs(TSK_FS_FILE * fs_file,
 
                             }
                             else {      // Leading byte is not 0x0F
-                                reallyCompressed = TRUE;
+                                //reallyCompressed = TRUE;
+								
 #ifdef HAVE_LIBZ
+								char *uncBuf; 
+								uint64_t uLen;
+                                unsigned long bytesConsumed;
+								int infResult;
+
                                 if (tsk_verbose)
                                     tsk_fprintf(stderr,
                                         "hfs_load_extended_attrs: Uncompressing (inflating) data.");
-                                cmpSize = attributeLength - 16; // subt size of header
                                 // Uncompress the remainder of the attribute, and load as 128-0
-                                char *uncBuf = (char *) tsk_malloc(uncSize + 100);        // add some extra space
+								// Note: cast is OK because uncSize will be quite modest, less than 4000.
+                                uncBuf = (char *) tsk_malloc((size_t) uncSize + 100);        // add some extra space
                                 if (uncBuf == NULL) {
                                     error_returned
                                         (" - hfs_load_extended_attrs, space for the uncompressed attr");
@@ -3316,9 +3608,8 @@ hfs_load_extended_attrs(TSK_FS_FILE * fs_file,
                                     close_attr_file(&attrFile);
                                     return 1;
                                 }
-                                uint64_t uLen;
-                                unsigned long bytesConsumed;
-                                int infResult = zlib_inflate(buffer + 16, (uint64_t) (attributeLength - 16),    // source, srcLen
+                                
+                                infResult = zlib_inflate(buffer + 16, (uint64_t) (attributeLength - 16),    // source, srcLen
                                     uncBuf, (uint64_t) (uncSize + 100), // dest, destLen
                                     &uLen, &bytesConsumed);     // returned by the function
                                 if (infResult != 0) {
@@ -3362,12 +3653,14 @@ hfs_load_extended_attrs(TSK_FS_FILE * fs_file,
                                 // ZLIB compression library is not available, so we will load a zero-length
                                 // default DATA attribute.  Without this, icat may misbehave.
 
+								// This is one byte long, so the ptr is not null, but only loading zero bytes.
+                                uint8_t uncBuf[1];
+
                                 if (tsk_verbose)
                                     tsk_fprintf(stderr,
                                         "hfs_load_extended_attrs: ZLIB not available, so loading an empty default DATA attribute.\n");
 
-                                // This is one byte long, so the ptr is not null, but only loading zero bytes.
-                                uint8_t uncBuf[1];
+                                
                                 if (tsk_fs_attr_set_str(fs_file,
                                         fs_attr_unc, "DATA",
                                         TSK_FS_ATTR_TYPE_HFS_DATA,
@@ -3387,7 +3680,7 @@ hfs_load_extended_attrs(TSK_FS_FILE * fs_file,
                     }
                     else if (cmpType == 4) {
                         // Data is compressed in the resource fork
-                        reallyCompressed = TRUE;
+                        //reallyCompressed = TRUE;
                         *compDataInRSRC = TRUE; // The compressed data is in the RSRC fork
                         if (tsk_verbose)
                             tsk_fprintf(stderr,
@@ -3397,8 +3690,6 @@ hfs_load_extended_attrs(TSK_FS_FILE * fs_file,
                 else {          // Attrbute name is NOT com.apple.decmpfs
                     attrType = TSK_FS_ATTR_TYPE_HFS_EXT_ATTR;
                 }               // END if attribute name is com.apple.decmpfs  ELSE clause
-
-                TSK_FS_ATTR *fs_attr;
 
                 if ((fs_attr =
                         tsk_fs_attrlist_getnew(fs_file->meta->attr,
@@ -3523,13 +3814,15 @@ typedef struct RES_DESCRIPTOR {
 void
 free_res_descriptor(RES_DESCRIPTOR * rd)
 {
+	RES_DESCRIPTOR *nxt;
+
     if (rd == NULL)
         return;
-    RES_DESCRIPTOR *nx = rd->next;
+    nxt = rd->next;
     if (rd->name != NULL)
         free(rd->name);
     free(rd);
-    free_res_descriptor(nx);    // tail recursive
+    free_res_descriptor(nxt);    // tail recursive
 }
 
 /**
@@ -3549,6 +3842,29 @@ hfs_parse_resource_fork(TSK_FS_FILE * fs_file)
 
     RES_DESCRIPTOR *result = NULL;
     RES_DESCRIPTOR *last = NULL;
+	TSK_FS_INFO *fs_info;
+	hfs_fork *fork_info;
+	hfs_fork *resForkInfo;
+	uint64_t resSize;
+	const TSK_FS_ATTR *rAttr;
+	hfs_resource_fork_header rfHeader;
+	hfs_resource_fork_header *resHead;
+    uint32_t dataOffset;
+    uint32_t mapOffset;
+    uint32_t mapLength;
+    char *map;
+	int attrReadResult;
+	int attrReadResult1;
+	int attrReadResult2;
+	hfs_resource_fork_map_header *mapHdr;
+    uint16_t typeListOffset;
+    uint16_t nameListOffset;
+    unsigned char hasNameList;
+    char *nameListBegin = NULL;
+	hfs_resource_type_list *typeList;
+    uint16_t numTypes;
+    hfs_resource_type_list_item *tlItem;
+    int mindx;  // index for looping over resource types
 
     if (fs_file == NULL) {
         error_detected(TSK_ERR_FS_ARG,
@@ -3571,7 +3887,7 @@ hfs_parse_resource_fork(TSK_FS_FILE * fs_file)
     }
 
     // Extract the fs
-    TSK_FS_INFO *fs_info = fs_file->fs_info;
+    fs_info = fs_file->fs_info;
     if (fs_info == NULL) {
         error_detected(TSK_ERR_FS_ARG,
             "hfs_parse_resource_fork: null fs within fs_info");
@@ -3582,10 +3898,10 @@ hfs_parse_resource_fork(TSK_FS_FILE * fs_file)
 
     // Try to look at the Resource Fork for an HFS+ file
     // Should be able to cast this to hfs_fork *
-    hfs_fork *fork_info = (hfs_fork *) fs_file->meta->content_ptr;      // The data fork
+    fork_info = (hfs_fork *) fs_file->meta->content_ptr;      // The data fork
     // The resource fork is the second one.
-    hfs_fork *resForkInfo = &fork_info[1];
-    uint64_t resSize = tsk_getu64(fs_info->endian, resForkInfo->logic_sz);
+    resForkInfo = &fork_info[1];
+    resSize = tsk_getu64(fs_info->endian, resForkInfo->logic_sz);
     //uint32_t numBlocks = tsk_getu32(fs_info->endian, resForkInfo->total_blk);
     //uint32_t clmpSize = tsk_getu32(fs_info->endian, resForkInfo->clmp_sz);
 
@@ -3597,7 +3913,7 @@ hfs_parse_resource_fork(TSK_FS_FILE * fs_file)
     // OK, resource size must be > 0
 
     // find the attribute for the resource fork
-    const TSK_FS_ATTR *rAttr =
+    rAttr =
         tsk_fs_file_attr_get_type(fs_file, TSK_FS_ATTR_TYPE_HFS_DATA,
         HFS_FS_ATTR_ID_RSRC, TRUE);
 
@@ -3609,54 +3925,52 @@ hfs_parse_resource_fork(TSK_FS_FILE * fs_file)
     }
 
     // JUST read the resource fork header
-    hfs_resource_fork_header rfHeader;
+    
 
-    int result1 =
+    attrReadResult1 =
         tsk_fs_attr_read(rAttr, 0, (char *) &rfHeader,
         sizeof(hfs_resource_fork_header), TSK_FS_FILE_READ_FLAG_NONE);
 
-    if (result1 < 0 || result1 != sizeof(hfs_resource_fork_header)) {
+    if (attrReadResult1 < 0 || attrReadResult1 != sizeof(hfs_resource_fork_header)) {
         error_returned
             (" hfs_parse_resource_fork: trying to read the resource fork header");
         return NULL;
     }
 
     // Begin to parse the resource fork
-    hfs_resource_fork_header *resHead = &rfHeader;
-    uint32_t dataOffset = tsk_getu32(fs_info->endian, resHead->dataOffset);
-    uint32_t mapOffset = tsk_getu32(fs_info->endian, resHead->mapOffset);
+    resHead = &rfHeader;
+    dataOffset = tsk_getu32(fs_info->endian, resHead->dataOffset);
+    mapOffset = tsk_getu32(fs_info->endian, resHead->mapOffset);
     //uint32_t dataLength = tsk_getu32(fs_info->endian, resHead->dataLength);
-    uint32_t mapLength = tsk_getu32(fs_info->endian, resHead->mapLength);
+    mapLength = tsk_getu32(fs_info->endian, resHead->mapLength);
 
     // Read in the WHOLE map
-    char *map = tsk_malloc(mapLength);
+    map = (char *) tsk_malloc(mapLength);
     if (map == NULL) {
         error_returned
             ("- hfs_parse_resource_fork: could not allocate space for the resource fork map");
         return NULL;
     }
 
-    int result2 =
+    attrReadResult =
         tsk_fs_attr_read(rAttr, (uint64_t) mapOffset, map,
         (size_t) mapLength, TSK_FS_FILE_READ_FLAG_NONE);
 
-    if (result2 < 0 || result2 != mapLength) {
+    if (attrReadResult < 0 || attrReadResult != mapLength) {
         error_returned
             ("- hfs_parse_resource_fork: could not read the map");
         free(map);
         return NULL;
     }
 
-    hfs_resource_fork_map_header *mapHdr =
+    mapHdr =
         (hfs_resource_fork_map_header *) map;
 
-    uint16_t typeListOffset =
+    typeListOffset =
         tsk_getu16(fs_info->endian, mapHdr->typeListOffset);
 
-    uint16_t nameListOffset =
+    nameListOffset =
         tsk_getu16(fs_info->endian, mapHdr->nameListOffset);
-    unsigned char hasNameList;
-    char *nameListBegin = NULL;
 
     if (nameListOffset >= mapLength || nameListOffset == 0) {
         hasNameList = FALSE;
@@ -3666,28 +3980,36 @@ hfs_parse_resource_fork(TSK_FS_FILE * fs_file)
         nameListBegin = map + nameListOffset;
     }
 
-    hfs_resource_type_list *typeList =
+    typeList =
         (hfs_resource_type_list *) (map + typeListOffset);
-
-    uint16_t numTypes =
+    numTypes =
         tsk_getu16(fs_info->endian, typeList->typeCount) + 1;
 
-    hfs_resource_type_list_item *tlItem;
-    int mindx;
     for (mindx = 0; mindx < numTypes; mindx++) {
+		uint16_t numRes;
+        uint16_t refOff;
+		int pindx;  // index for looping over resources
+		uint16_t rID;
+		uint32_t rOffset;
+
         tlItem = &(typeList->type[mindx]);
+        numRes = tsk_getu16(fs_info->endian, tlItem->count) + 1;
+        refOff = tsk_getu16(fs_info->endian, tlItem->offset);
+		
 
-        uint16_t numRes = tsk_getu16(fs_info->endian, tlItem->count) + 1;
-        uint16_t refOff = tsk_getu16(fs_info->endian, tlItem->offset);
-
-        int pindx;
         for (pindx = 0; pindx < numRes; pindx++) {
+			int16_t nameOffset;
+			char *nameBuffer;
+			RES_DESCRIPTOR *rsrc;
+			char lenBuff[4];  // first 4 bytes of a resource encodes its length
+			uint32_t rLen;  // Resource length
+
             hfs_resource_refListItem *item =
                 ((hfs_resource_refListItem *) (((uint8_t *) typeList) +
                     refOff)) + pindx;
-            int16_t nameOffset =
+            nameOffset =
                 tsk_gets16(fs_info->endian, item->resNameOffset);
-            char *nameBuffer = NULL;
+            nameBuffer = NULL;
 
             if (hasNameList && nameOffset != -1) {
                 char *name = nameListBegin + nameOffset;
@@ -3714,7 +4036,7 @@ hfs_parse_resource_fork(TSK_FS_FILE * fs_file)
                 nameBuffer[6] = (char) 0;
             }
 
-            RES_DESCRIPTOR *rsrc =
+            rsrc =
                 (RES_DESCRIPTOR *) tsk_malloc(sizeof(RES_DESCRIPTOR));
             if (rsrc == NULL) {
                 error_returned
@@ -3731,26 +4053,23 @@ hfs_parse_resource_fork(TSK_FS_FILE * fs_file)
             last = rsrc;
             rsrc->next = NULL;
 
-            uint16_t rID = tsk_getu16(fs_info->endian, item->resID);
-            uint32_t rOffset =
+            rID = tsk_getu16(fs_info->endian, item->resID);
+            rOffset =
                 tsk_getu24(fs_info->endian,
                 item->resDataOffset) + dataOffset;
 
             // Just read the first four bytes of the resource to get its length.  It MUST
             // be at least 4 bytes long
-
-            char lenBuff[4];
-
-            int result3 = tsk_fs_attr_read(rAttr, (uint64_t) rOffset,
+            attrReadResult2 = tsk_fs_attr_read(rAttr, (uint64_t) rOffset,
                 lenBuff, (size_t) 4, TSK_FS_FILE_READ_FLAG_NONE);
 
-            if (result3 != 4) {
+            if (attrReadResult2 != 4) {
                 error_returned
                     ("- hfs_parse_resource_fork: could not read the 4-byte length at beginning of resource");
                 free_res_descriptor(result);
                 return NULL;
             }
-            uint32_t rLen = tsk_getu32(TSK_BIG_ENDIAN, lenBuff);        //TODO
+            rLen = tsk_getu32(TSK_BIG_ENDIAN, lenBuff);        //TODO
 
             rsrc->id = rID;
             rsrc->offset = rOffset + 4;
@@ -3797,6 +4116,9 @@ reset_attribute_counter()
 }
 
 
+
+
+
 static uint8_t
 hfs_load_attrs(TSK_FS_FILE * fs_file)
 {
@@ -3807,7 +4129,10 @@ hfs_load_attrs(TSK_FS_FILE * fs_file)
     hfs_fork *forkx;
     unsigned char resource_fork_has_contents = FALSE;
     unsigned char compression_flag = FALSE;
-
+	unsigned char isCompressed = FALSE;
+    unsigned char compDataInRSRCFork = FALSE;
+    uint64_t uncompressedSize;
+	uint64_t logicalSize; // of a fork
 
     // clean up any error messages that are lying around
     tsk_error_reset();
@@ -3844,57 +4169,6 @@ hfs_load_attrs(TSK_FS_FILE * fs_file)
         return 1;
     }
 
-    /* Some notes on how to implement hard links.
-     *
-     @@@ We need to detect hard links and load up the indirect node info
-     instead of the current node info.
-
-     //Detect Hard links
-     else if ((tsk_getu32(fs->endian,
-     entry.cat.std.u_info.file_type) == HFS_HARDLINK_FILE_TYPE)
-     && (tsk_getu32(fs->endian,
-     entry.cat.std.u_info.file_cr) ==
-     HFS_HARDLINK_FILE_CREATOR)) {
-
-     //  Get the indirect node value
-     tsk_getu32(fs->endian, entry.cat.std.perm.special.inum)
-
-     // Find the indirect node
-     "/____HFS+ Private Data/iNodeXXXX"
-     // Load its runs and look in extents for others (based on its CNID)
-     *
-     * PROPOSED:
-     if ((tsk_getu32(fs->endian,
-     entry.cat.std.u_info.file_type) == HFS_HARDLINK_FILE_TYPE)
-     && (tsk_getu32(fs->endian,
-     entry.cat.std.u_info.file_cr) ==
-     HFS_HARDLINK_FILE_CREATOR)) {
-
-     //  Get the indirect node value
-     uint32_t iinum = tsk_getu32(fs->endian, entry.cat.std.perm.special.inum);
-
-     Now, need to find the  file.  iinum is actually part of the
-     filename.  We find *that* file and then use its cnid (or inum).
-
-     #include "tsk_fs.h"  <- need this
-
-     fs_file = tsk_fs_open_file_meta(fs, NULL, @@@iinum);
-
-     // Now repeat the logic from above. This fs_file must be well formed
-     if ((fs_file == NULL) || (fs_file->meta == NULL)
-     || (fs_file->fs_info == NULL)) {
-     tsk_errno = TSK_ERR_FS_ARG;
-     tsk_error_set_errstr(
-     "hfs_load_attrs: fs_file or meta is NULL");
-     return 1;
-     }
-
-     // All is well.  No need to recompute fs and hfs -- they should be the same
-
-     }  // OK, now continue with normal processing, but use the new fs_file.
-
-     *************** END of proposed hardlink code ***********************************/
-
     // Initialize the attribute counter
     reset_attribute_counter();
 
@@ -3910,9 +4184,7 @@ hfs_load_attrs(TSK_FS_FILE * fs_file)
     // We do these first, so that we can detect the mode of compression, if
     // any.  We need to know that mode in order to handle the forks.
 
-    unsigned char isCompressed = FALSE;
-    unsigned char compDataInRSRCFork = FALSE;
-    uint64_t uncompressedSize;
+    
 
     if (tsk_verbose)
         tsk_fprintf(stderr,
@@ -3961,7 +4233,7 @@ hfs_load_attrs(TSK_FS_FILE * fs_file)
             // or if this is a REG or LNK file.  Otherwise, we skip
 
 
-            uint64_t logicalSize = tsk_getu64(fs->endian, forkx->logic_sz);
+            logicalSize = tsk_getu64(fs->endian, forkx->logic_sz);
 
             if (logicalSize > 0 ||
                 fs_file->meta->type == TSK_FS_META_TYPE_REG ||
@@ -4042,7 +4314,7 @@ hfs_load_attrs(TSK_FS_FILE * fs_file)
 
         forkx = &((hfs_fork *) fs_file->meta->content_ptr)[1];
 
-        uint64_t logicalSize = tsk_getu64(fs->endian, forkx->logic_sz);
+        logicalSize = tsk_getu64(fs->endian, forkx->logic_sz);
 
         // Skip if the length of the resource fork is zero
         if (logicalSize > 0) {
@@ -4487,7 +4759,7 @@ print_inode_name(FILE * hFile, TSK_FS_INFO * fs, TSK_INUM_T inum)
     char fn[HFS_MAXNAMLEN + 1];
     HFS_ENTRY entry;
 
-    if (hfs_cat_file_lookup(hfs, inum, &entry))
+    if (hfs_cat_file_lookup(hfs, inum, &entry, FALSE))
         return 1;
 
     if (hfs_UTF16toUTF8(fs, entry.thread.name.unicode,
@@ -4521,7 +4793,7 @@ print_parent_path(FILE * hFile, TSK_FS_INFO * fs, TSK_INUM_T inum)
         return 1;
     }
 
-    if (hfs_cat_file_lookup(hfs, inum, &entry))
+    if (hfs_cat_file_lookup(hfs, inum, &entry, FALSE))
         return 1;
 
     if (hfs_UTF16toUTF8(fs, entry.thread.name.unicode,
@@ -4927,6 +5199,9 @@ hfs_istat(TSK_FS_INFO * fs, FILE * hFile, TSK_INUM_T inum,
     HFS_PRINT_ADDR print;
     HFS_ENTRY entry;
     char timeBuf[128];
+	// Compression ATTR, if there is one:
+    const TSK_FS_ATTR *compressionAttr = NULL;
+	RES_DESCRIPTOR *rd;   // descriptor of a resource
 
     tsk_error_reset();
 
@@ -4952,8 +5227,9 @@ hfs_istat(TSK_FS_INFO * fs, FILE * hFile, TSK_INUM_T inum,
 
 
     if (inum >= HFS_FIRST_USER_CNID) {
+		int rslt;
         tsk_fprintf(hFile, "File Path: ");
-        int rslt = print_parent_path(hFile, fs, inum);
+        rslt = print_parent_path(hFile, fs, inum);
         if (rslt != 0)
             tsk_fprintf(hFile, " Error in printing path\n");
         else
@@ -4989,15 +5265,34 @@ hfs_istat(TSK_FS_INFO * fs, FILE * hFile, TSK_INUM_T inum,
 
     tsk_fprintf(hFile, "Link count:\t%d\n", fs_file->meta->nlink);
 
-    if (hfs_cat_file_lookup(hfs, inum, &entry) == 0) {
-        tsk_fprintf(hFile, "\n");
-
-        hfs_uni_str *nm = &entry.thread.name;
+    if (hfs_cat_file_lookup(hfs, inum, &entry, TRUE) == 0) {
+		hfs_uni_str *nm = &entry.thread.name;
         char name_buf[HFS_MAXNAMLEN + 1];
+		TSK_INUM_T par_cnid;  // parent CNID
+
+        tsk_fprintf(hFile, "\n");
         hfs_UTF16toUTF8(fs, nm->unicode, (int) tsk_getu16(fs->endian,
                 nm->length), &name_buf[0], HFS_MAXNAMLEN + 1,
             HFS_U16U8_FLAG_REPLACE_SLASH | HFS_U16U8_FLAG_REPLACE_CONTROL);
         tsk_fprintf(hFile, "File Name: %s\n", name_buf);
+
+        // Test here to see if this is a hard link.
+        par_cnid = tsk_getu32(fs->endian, &(entry.thread.parent_cnid));
+        if((hfs->has_meta_dir_crtime && par_cnid == hfs->meta_dir_inum) ||
+        		(hfs->has_meta_crtime && par_cnid == hfs->meta_inum)){
+        	int instr =  strncmp(name_buf, "iNode", 5);
+        	int drstr = strncmp(name_buf, "dir_", 4);
+
+        	if(instr == 0 &&
+        			hfs->has_meta_crtime &&
+        			par_cnid == hfs->meta_inum) {
+        		tsk_fprintf(hFile, "This is a hard link to a file\n");
+        	} else if( drstr == 0 &&
+        			hfs->has_meta_dir_crtime &&
+        			par_cnid == hfs->meta_dir_inum) {
+        		tsk_fprintf(hFile, "This is a hard link to a folder.\n");
+        	}
+        }
 
         /* The cat.perm union contains file-type specific values.
          * Print them if they are relevant. */
@@ -5060,10 +5355,11 @@ hfs_istat(TSK_FS_INFO * fs, FILE * hFile, TSK_INUM_T inum,
 
         // File_type and file_cr are not relevant for Folders
         if (fs_file->meta->type != TSK_FS_META_TYPE_DIR) {
+			int windx;  // loop index
             tsk_fprintf(hFile,
                 "File type:\t%04" PRIx32 "  ",
                 tsk_getu32(fs->endian, entry.cat.std.u_info.file_type));
-            int windx;
+           
             for (windx = 0; windx < 4; windx++) {
                 uint8_t cu = entry.cat.std.u_info.file_type[windx];
                 if (cu >= 32 && cu <= 126)
@@ -5212,8 +5508,7 @@ hfs_istat(TSK_FS_INFO * fs, FILE * hFile, TSK_INUM_T inum,
     // Just force the loading of all attributes.
     (void) tsk_fs_file_attr_get(fs_file);
 
-    // Compression ATTR, if there is one:
-    const TSK_FS_ATTR *compressionAttr = NULL;
+    
 
     /* Print all of the attributes */
     tsk_fprintf(hFile, "\nAttributes: \n");
@@ -5223,13 +5518,13 @@ hfs_istat(TSK_FS_INFO * fs, FILE * hFile, TSK_INUM_T inum,
         // cycle through the attributes
         cnt = tsk_fs_file_attr_getsize(fs_file);
         for (i = 0; i < cnt; i++) {
-
+			const char *type;  // type of the attribute as a string
             const TSK_FS_ATTR *fs_attr =
                 tsk_fs_file_attr_get_idx(fs_file, i);
             if (!fs_attr)
                 continue;
 
-            const char *type = hfs_attrTypeName((uint32_t) fs_attr->type);
+            type = hfs_attrTypeName((uint32_t) fs_attr->type);
 
 
             // We will need to do something better than this, in the end.
@@ -5297,34 +5592,40 @@ hfs_istat(TSK_FS_INFO * fs, FILE * hFile, TSK_INUM_T inum,
     // IF this is a compressed file
     if (compressionAttr != NULL) {
         const TSK_FS_ATTR *fs_attr = compressionAttr;
+		int attrReadResult;
+		DECMPFS_DISK_HEADER *cmph;
+        uint32_t cmpType;
+        uint64_t uncSize;
+        unsigned char reallyCompressed;
+		uint64_t cmpSize = 0;
+
         // Read the attribute.  It cannot be too large because it is stored in
         // a btree node
-        char *aBuf = tsk_malloc(fs_attr->size);
+        char *aBuf = (char *) tsk_malloc((size_t)fs_attr->size);
         if (aBuf == NULL) {
             error_returned("hfs_istat: space for a compression attribute");
             return 1;
         }
-        int rtv = tsk_fs_attr_read(fs_attr, (TSK_OFF_T) 0,
-            aBuf, fs_attr->size, (TSK_FS_FILE_READ_FLAG_ENUM) 0x00);
-        if (rtv == -1) {
+        attrReadResult = tsk_fs_attr_read(fs_attr, (TSK_OFF_T) 0,
+            aBuf, (size_t) fs_attr->size, (TSK_FS_FILE_READ_FLAG_ENUM) 0x00);
+        if (attrReadResult == -1) {
             error_returned("hfs_istat: reading the compression attribute");
             free(aBuf);
             return 1;
         }
-        else if (rtv < fs_attr->size) {
+        else if (attrReadResult < fs_attr->size) {
             error_detected(TSK_ERR_FS_READ,
                 "hfs_istat: could not read the whole compression attribute");
             free(aBuf);
             return 1;
         }
         // Now, cast the attr into a compression header
-        DECMPFS_DISK_HEADER *cmph = (DECMPFS_DISK_HEADER *) aBuf;
-        uint32_t cmpType =
+        cmph = (DECMPFS_DISK_HEADER *) aBuf;
+        cmpType =
             tsk_getu32(TSK_LIT_ENDIAN, cmph->compression_type);
-        uint64_t uncSize =
+        uncSize =
             tsk_getu64(TSK_LIT_ENDIAN, cmph->uncompressed_size);
-        unsigned char reallyCompressed;
-        uint64_t cmpSize = 0;
+        
         if (cmpType == 3) {
             // Data is inline
             if ((cmph->attr_bytes[0] & 0x0F) == 0x0F) {
@@ -5368,7 +5669,7 @@ hfs_istat(TSK_FS_INFO * fs, FILE * hFile, TSK_INUM_T inum,
     }
 
     // This will return NULL if there is an error, or if there are no resources
-    RES_DESCRIPTOR *rd = hfs_parse_resource_fork(fs_file);
+    rd = hfs_parse_resource_fork(fs_file);
     // TODO: Should check the errnum here to see if there was an error
 
     if (rd != NULL) {
@@ -5382,6 +5683,35 @@ hfs_istat(TSK_FS_INFO * fs, FILE * hFile, TSK_INUM_T inum,
     }
     // This is OK to call with NULL
     free_res_descriptor(rd);
+
+    if(fs_file->meta->type == TSK_FS_META_TYPE_LNK) {
+    	// This is a symbolic link.  So, print out the link target
+    	//char path_buf[fs_file->meta->size + 1] ;
+		char * path_buf = (char *) tsk_malloc((size_t) fs_file->meta->size + 1);
+		if(path_buf == NULL) {
+			tsk_fprintf(hFile, "WARNING, could not allocate space for the symbolic link target\n");
+			tsk_error_reset();
+		} else {
+			ssize_t bytes_read;
+			memset(&path_buf[0], 0, (size_t)fs_file->meta->size + 1);
+			bytes_read = tsk_fs_file_read(fs_file, (TSK_OFF_T) 0,
+				path_buf, (size_t)(fs_file->meta->size + 1),
+				TSK_FS_FILE_READ_FLAG_NONE);
+			if(bytes_read == -1) {
+				error_returned("hfs_istat: reading the path of the symbolic link");
+				tsk_fs_file_close(fs_file);
+				return 1;
+			} else if(bytes_read != fs_file->meta->size) {
+				error_detected(TSK_ERR_FS_CORRUPT,
+					"hfs_istat: Reading the path of the symbolic link, expected %u bytes, but found %u bytes",
+					fs_file->meta->size, bytes_read);
+				tsk_fs_file_close(fs_file);
+				return 1;
+			}
+			tsk_fprintf(hFile, "\nThis is a symbolic link, with target:\n   %s\n", path_buf);
+		}
+
+    }
 
     tsk_fs_file_close(fs_file);
     return 0;
@@ -5444,6 +5774,10 @@ hfs_open(TSK_IMG_INFO * img_info, TSK_OFF_T offset,
     unsigned int len;
     TSK_FS_INFO *fs;
     ssize_t cnt;
+	TSK_FS_FILE * file;  // The root directory, or the metadata directories
+	TSK_INUM_T inum;  // The inum (or CNID) of the metadata directories
+	int8_t result;  // of tsk_fs_path2inum()
+	char dirname[31];  // will hold the name of the "directory" metadata directory
 
     tsk_error_reset();
 
@@ -5688,6 +6022,77 @@ hfs_open(TSK_IMG_INFO * img_info, TSK_OFF_T offset,
     fs->name_cmp = hfs_name_cmp;
     fs->journ_inum = 0;
 
+    /* Creation Times */
+
+    // First, the root
+    file =
+            tsk_fs_file_open_meta(fs, NULL, 2);
+    if(file != NULL) {
+    	hfs->root_crtime = file->meta->crtime;
+    	hfs->has_root_crtime = TRUE;
+    } else {
+    	hfs->has_root_crtime = FALSE;
+    }
+
+    // Now the metadata directory
+    
+    // The metadata directory is a sub-directory of the root.  Its name begins with four nulls, followed
+    // by "HFS+ Private Data".  The file system parsing code replaces nulls in filenames with UTF8_NULL_REPLACE.
+    // In the released version of TSK, this replacement is the character '^'.
+    // NOTE: There is a standard Unicode replacement which is 0xfffd in UTF16 and 0xEF 0xBF 0xBD in UTF8.
+    // Systems that require the standard definition can redefine UTF8_NULL_REPLACE and UTF16_NULL_REPLACE
+    // in tsk_hfs.h
+    result = tsk_fs_path2inum(fs, "/" UTF8_NULL_REPLACE UTF8_NULL_REPLACE UTF8_NULL_REPLACE UTF8_NULL_REPLACE
+    		"HFS+ Private Data", &inum, NULL);
+    if(result == 0) {
+    	file = tsk_fs_file_open_meta(fs, NULL, inum);
+    	if(file != NULL) {
+    		hfs->meta_crtime = file->meta->crtime;
+    		hfs->has_meta_crtime = TRUE;
+    		hfs->meta_inum = inum;
+    	} else {
+    		hfs->has_meta_crtime = FALSE;
+    	}
+    } else {
+    	hfs->has_meta_crtime = FALSE;
+    }
+
+    // Now, the directory metadata directory!
+    
+    memset(dirname, 0, 31);
+
+    // The "directory" metadata directory, where hardlinked directories actually live, is a subdirectory
+    // of the root.  The beginning of the name of this directory is ".HFS+ Private Directory Data" which
+    // is followed by a carriage return (ASCII 13).
+    strncpy(dirname, "/.HFS+ Private Directory Data", 29);
+    dirname[29] = (char) 13;
+
+    result = tsk_fs_path2inum(fs, dirname, &inum, NULL);
+    if(result == 0) {
+    	file = tsk_fs_file_open_meta(fs, NULL, inum);
+    	if(file != NULL) {
+    		hfs->metadir_crtime = file->meta->crtime;
+    		hfs->has_meta_dir_crtime = TRUE;
+    		hfs->meta_dir_inum = inum;
+    	} else {
+    		hfs->has_meta_dir_crtime = FALSE;
+    	}
+    } else {
+    	hfs->has_meta_dir_crtime = FALSE;
+    }
+
+    if(hfs->has_root_crtime && hfs->has_meta_crtime && hfs->has_meta_dir_crtime) {
+    	if(tsk_verbose)
+    		tsk_fprintf(stderr, "Creation times for key folders have been read and cached.\n");
+    } else if (hfs->has_root_crtime || hfs->has_meta_crtime || hfs->has_meta_dir_crtime) {
+        tsk_fprintf(stderr, "WARNING: Could not open the root directory or one of the metadata directories"
+        		" to determine creation time.  Hard-link detection will be impaired.\n");
+    } else {
+    	tsk_fprintf(stderr, "WARNING: Could not open the root directory AND both of the metadata directories"
+    			" to determine creation times.  Hard-link detection will be turned off.\n");
+    }
+
+
     return fs;
 }
 
@@ -5715,23 +6120,25 @@ error_detected(uint32_t errnum, char *errstr, ...)
 
     va_start(args, errstr);
 
-    TSK_ERROR_INFO *errInfo = tsk_error_get_info();
-    char *loc_errstr = errInfo->errstr;
+	{
+		TSK_ERROR_INFO *errInfo = tsk_error_get_info();
+		char *loc_errstr = errInfo->errstr;
 
-    if (errInfo->t_errno == 0)
-        errInfo->t_errno = errnum;
-    else {
-        //This should not happen!  We don't want to wipe out the existing error
-        //code, so we write the new code into the error string, in hex.
-        int sl = strlen(errstr);
-        snprintf(loc_errstr + sl, TSK_ERROR_STRING_MAX_LENGTH - sl,
-            " Next errnum: 0x%x ", errnum);
-    }
-    if (errstr != NULL) {
-        int sl = strlen(loc_errstr);
-        vsnprintf(loc_errstr + sl, TSK_ERROR_STRING_MAX_LENGTH - sl,
-            errstr, args);
-    }
+		if (errInfo->t_errno == 0)
+			errInfo->t_errno = errnum;
+		else {
+			//This should not happen!  We don't want to wipe out the existing error
+			//code, so we write the new code into the error string, in hex.
+			int sl = strlen(errstr);
+			snprintf(loc_errstr + sl, TSK_ERROR_STRING_MAX_LENGTH - sl,
+				" Next errnum: 0x%x ", errnum);
+		}
+		if (errstr != NULL) {
+			int sl = strlen(loc_errstr);
+			vsnprintf(loc_errstr + sl, TSK_ERROR_STRING_MAX_LENGTH - sl,
+				errstr, args);
+		}
+	}
 
     va_end(args);
 
@@ -5753,15 +6160,17 @@ error_returned(char *errstr, ...)
     va_list args;
     va_start(args, errstr);
 
-    TSK_ERROR_INFO *errInfo = tsk_error_get_info();
-    char *loc_errstr2 = errInfo->errstr2;
+	{
+		TSK_ERROR_INFO *errInfo = tsk_error_get_info();
+		char *loc_errstr2 = errInfo->errstr2;
 
-    if (errInfo->t_errno == 0)
-        errInfo->t_errno = TSK_ERR_AUX_GENERIC;
-    if (errstr != NULL) {
-        int sl = strlen(loc_errstr2);
-        vsnprintf(loc_errstr2 + sl, TSK_ERROR_STRING_MAX_LENGTH - sl,
-            errstr, args);
-    }
+		if (errInfo->t_errno == 0)
+			errInfo->t_errno = TSK_ERR_AUX_GENERIC;
+		if (errstr != NULL) {
+			int sl = strlen(loc_errstr2);
+			vsnprintf(loc_errstr2 + sl, TSK_ERROR_STRING_MAX_LENGTH - sl,
+				errstr, args);
+		}
+	}
     va_end(args);
 }
