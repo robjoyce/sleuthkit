@@ -753,8 +753,8 @@ extern uint8_t hfs_jblk_walk(TSK_FS_INFO *, TSK_DADDR_T, TSK_DADDR_T, int,
     TSK_FS_JBLK_WALK_CB, void *);
 extern uint8_t hfs_jentry_walk(TSK_FS_INFO *, int, TSK_FS_JENTRY_WALK_CB,
     void *);
+
 extern char *hfs_get_inode_name(TSK_FS_INFO * fs, TSK_INUM_T inum);
-extern uint8_t hfs_cat_file_lookup(HFS_INFO * hfs, TSK_INUM_T inum, HFS_ENTRY * entry);
 
 extern TSK_INUM_T hfs_follow_hard_link(HFS_INFO * hfs, hfs_file * entry, unsigned char * is_error);
 extern uint8_t hfs_cat_file_lookup(HFS_INFO * hfs, TSK_INUM_T inum, HFS_ENTRY * entry,

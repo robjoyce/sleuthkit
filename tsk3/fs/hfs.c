@@ -4758,7 +4758,7 @@ char *hfs_get_inode_name(TSK_FS_INFO * fs, TSK_INUM_T inum) {
     HFS_INFO *hfs = (HFS_INFO *) fs;
     HFS_ENTRY entry;
 	
-    if (hfs_cat_file_lookup(hfs, inum, &entry))
+    if (hfs_cat_file_lookup(hfs, inum, &entry, FALSE))
         return NULL;
 
 	char *fn = malloc( HFS_MAXNAMLEN + 1 );
