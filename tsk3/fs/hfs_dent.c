@@ -73,7 +73,6 @@
 #include "tsk_fs_i.h"
 #include "tsk_hfs.h"
 
-
 /* convert HFS+'s UTF16 to UTF8
  * replaces null characters with another character (0xfffd)
  * replaces slashes (permitted by HFS+ but causes problems with TSK)
@@ -214,10 +213,12 @@ hfs_dir_open_meta_cb(HFS_INFO * hfs, int8_t level_type,
 
     if (level_type == HFS_BT_NODE_TYPE_IDX) {
         if (tsk_getu32(hfs->fs_info.endian,
-                cur_key->parent_cnid) < *cnid_p)
+                cur_key->parent_cnid) < *cnid_p) {
             return HFS_BTREE_CB_IDX_LT;
-        else
+        }
+        else {
             return HFS_BTREE_CB_IDX_EQGT;
+        }
     }
     else {
         uint8_t *rec_buf = (uint8_t *) cur_key;
@@ -225,12 +226,13 @@ hfs_dir_open_meta_cb(HFS_INFO * hfs, int8_t level_type,
         size_t rec_off2;
 
         if (tsk_getu32(hfs->fs_info.endian,
-                cur_key->parent_cnid) < *cnid_p)
+                cur_key->parent_cnid) < *cnid_p) {
             return HFS_BTREE_CB_LEAF_GO;
+        }
         else if (tsk_getu32(hfs->fs_info.endian,
-                cur_key->parent_cnid) > *cnid_p)
+                cur_key->parent_cnid) > *cnid_p) {
             return HFS_BTREE_CB_LEAF_STOP;
-
+        }
         rec_off2 = 2 + tsk_getu16(hfs->fs_info.endian, cur_key->key_len);
         // @@@ NEED TO REPLACE THIS SOMEHOW, but need to figure out the max length
         /*
@@ -365,6 +367,7 @@ hfs_dir_open_meta(TSK_FS_INFO * fs, TSK_FS_DIR ** a_fs_dir,
     TSK_FS_DIR *fs_dir;
     TSK_FS_NAME *fs_name;
     HFS_DIR_OPEN_META_INFO info;
+
 
     tsk_error_reset();
 
