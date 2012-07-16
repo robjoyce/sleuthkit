@@ -661,6 +661,14 @@ typedef struct {
     TSK_INUM_T meta_inum;
     TSK_INUM_T meta_dir_inum;
 
+    // We cache the two metadata directory structures here, to speed up hard link resolution
+    TSK_FS_DIR * meta_dir;
+    TSK_FS_DIR * dir_meta_dir;
+
+    // We need a lock to protect the two metadata directory caches (if this is multi-threaded)
+    // and will also use this to protect the rest of the HFS_INFO struct.
+    tsk_lock_t metadata_dir_cache_lock;
+
 } HFS_INFO;
 
 typedef struct {
