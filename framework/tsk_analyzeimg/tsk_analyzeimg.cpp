@@ -44,7 +44,7 @@ makeDir(const TSK_TCHAR *dir)
         return 1;
     }
 #else
-
+#error Unsupported OS
 #endif
     return 0;
 }
@@ -85,27 +85,6 @@ usage(const char *program)
     fprintf(stderr, "\t-V: Display the tool version\n");
     fprintf(stderr, "\t-L: Print no error messages to STDERR -- only log them\n");
     exit(1);
-}
-
-// get the current directory
-// @@@ TODO: This should move into a framework utility
-static std::wstring getProgDir()
-{
-    wchar_t progPath[256];
-    wchar_t fullPath[256];
-    
-    GetModuleFileNameW(NULL, fullPath, 256);
-    for (int i = wcslen(fullPath)-1; i > 0; i--) {
-        if (i > 256)
-            break;
-
-        if (fullPath[i] == '\\') {
-            wcsncpy_s(progPath, fullPath, i+1);
-            progPath[i+1] = '\0';
-            break;
-        }
-    }
-    return std::wstring(progPath);
 }
 
 int main(int argc, char **argv1)
@@ -171,6 +150,12 @@ int main(int argc, char **argv1)
     }
 
     TSK_TCHAR *imagePath = argv[OPTIND];
+	if (TSTAT(imagePath, &stat_buf) != 0) {
+        std::wstringstream msg;
+        msg << L"Image file not found: " << imagePath;
+        LOGERROR(msg.str());
+        return 1;
+    }
 
     // Load the framework config if they specified it
     try
@@ -199,8 +184,6 @@ int main(int argc, char **argv1)
         return 1;
     }
 
-    SetSystemPropertyW(TskSystemProperties::PROG_DIR, getProgDir()); 
-
     if (outDirPath == _TSK_T("")) {
         outDirPath.assign(imagePath);
         outDirPath.append(_TSK_T("_tsk_out"));
@@ -212,14 +195,27 @@ int main(int argc, char **argv1)
         return 1;
     }
 
-    if (makeDir(outDirPath.c_str())) {
+    // @@@ Not UNIX-friendly
+    SetSystemPropertyW(TskSystemProperties::OUT_DIR, outDirPath);
+
+    if (makeDir(outDirPath.c_str())) 
+    {
         return 1;
     }
 
-    std::wstring logDir = outDirPath;
-    logDir.append(L"\\Logs");
+    if (makeDir(GetSystemPropertyW(TskSystemProperties::SYSTEM_OUT_DIR).c_str()))
+    {
+        return 1;
+    }
 
-    if (makeDir(logDir.c_str())) {
+    if (makeDir(GetSystemPropertyW(TskSystemProperties::MODULE_OUT_DIR).c_str()))
+    {
+        return 1;
+    }
+
+    std::wstring logDir = GetSystemPropertyW(TskSystemProperties::LOG_DIR);
+    if (makeDir(logDir.c_str())) 
+    {
         return 1;
     }
 
@@ -243,9 +239,6 @@ int main(int argc, char **argv1)
 
     log->open(logDir.c_str());
     TskServices::Instance().setLog(*log);
-
-    // @@@ Not UNIX-friendly
-    SetSystemPropertyW(TskSystemProperties::OUT_DIR, outDirPath);
 
     // Create and register our SQLite ImgDB class   
     std::auto_ptr<TskImgDB> pImgDB(NULL);
@@ -302,7 +295,7 @@ int main(int argc, char **argv1)
 
     TskPipeline *reportPipeline;
     try {
-        reportPipeline = pipelineMgr.createPipeline(TskPipelineManager::REPORTING_PIPELINE);
+        reportPipeline = pipelineMgr.createPipeline(TskPipelineManager::POST_PROCESSING_PIPELINE);
     }
     catch (TskException &e ) {
         std::wstringstream msg;
@@ -329,18 +322,12 @@ int main(int argc, char **argv1)
         return 1;
     }
 
-    // If carving has not been turned off via the command line and a path to an installation of Scalpel has been provided, prep for carving.
     std::auto_ptr<TskCarveExtractScalpel> carver;
-    if (doCarving)
+    if (doCarving && !GetSystemProperty("SCALPEL_DIR").empty())
     {
-        doCarving = !GetSystemProperty("SCALPEL_DIR").empty();
-
-        if (doCarving)
-        {
-            TskCarvePrepSectorConcat carvePrep;
-            carvePrep.processSectors(true);
-            carver.reset(new TskCarveExtractScalpel());
-        }
+        TskCarvePrepSectorConcat carvePrep;
+        carvePrep.processSectors(true);
+        carver.reset(new TskCarveExtractScalpel());
     }
 
     TskSchedulerQueue::task_struct *task;
@@ -370,16 +357,29 @@ int main(int argc, char **argv1)
         }
     }
 
+    if (filePipeline && !filePipeline->isEmpty())
+    {
+        filePipeline->logModuleExecutionTimes();
+    }
+
     // Do image analysis tasks.
-    if (reportPipeline) {
-        try {
+    if (reportPipeline) 
+    {
+        try 
+        {
             reportPipeline->run();
         }
-        catch (...) {
+        catch (...) 
+        {
             std::wstringstream msg;
             msg << L"Error running reporting pipeline";
             LOGERROR(msg.str());
             return 1;
+        }
+        
+        if (!reportPipeline->isEmpty())
+        {
+            reportPipeline->logModuleExecutionTimes();
         }
     }
 
