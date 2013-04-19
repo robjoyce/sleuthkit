@@ -18,6 +18,7 @@
  */
 package org.sleuthkit.datamodel;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -25,9 +26,8 @@ import java.util.List;
  */
 public class VolumeSystem extends AbstractContent {
 
-	private long volumeSystemHandle = 0;
+	private volatile long volumeSystemHandle = 0;
 	private long type, imgOffset, blockSize;
-	private Image parent;
 
 	/**
 	 * Constructor most inputs are from the database
@@ -46,15 +46,6 @@ public class VolumeSystem extends AbstractContent {
 		this.blockSize = blockSize;
 	}
 
-	/**
-	 * set the parent image called by parent on creation
-	 *
-	 * @param parent parent image
-	 */
-	protected void setParent(Image parent) {
-		this.parent = parent;
-	}
-
 	@Override
 	public int read(byte[] readBuffer, long offset, long len) throws TskCoreException {
 		synchronized (this) {
@@ -63,15 +54,6 @@ public class VolumeSystem extends AbstractContent {
 			}
 		}
 		return SleuthkitJNI.readVs(volumeSystemHandle, readBuffer, offset, len);
-	}
-
-	/**
-	 * get the parent image
-	 *
-	 * @return parent image
-	 */
-	public Image getParent() {
-		return parent;
 	}
 
 	@Override
@@ -122,9 +104,23 @@ public class VolumeSystem extends AbstractContent {
 	}
 
 	@Override
-	public void finalize() {
+	public void close() {
 		if (volumeSystemHandle != 0) {
-			SleuthkitJNI.closeVs(volumeSystemHandle);
+			synchronized (this) {
+				if (volumeSystemHandle != 0) {
+					SleuthkitJNI.closeVs(volumeSystemHandle);
+					volumeSystemHandle = 0;
+				}
+			}
+		}
+	}
+
+	@Override
+	public void finalize() throws Throwable {
+		try {
+			close();
+		} finally {
+			super.finalize();
 		}
 	}
 
@@ -144,7 +140,31 @@ public class VolumeSystem extends AbstractContent {
 	}
 
 	@Override
+	public List<Long> getChildrenIds() throws TskCoreException {
+		return getSleuthkitCase().getVolumeSystemChildrenIds(this);
+	}
+
+	@Override
 	public Image getImage() throws TskCoreException {
 		return getParent().getImage();
+	}
+
+	/**
+	 * @return a list of Volumes that are direct children of this VolumeSystem
+	 * @throws TskCoreException
+	 */
+	public List<Volume> getVolumes() throws TskCoreException {
+		List<Volume> volumes = new ArrayList<Volume>();
+		for (Content child : getChildren()) {
+			if (child instanceof Volume) {
+				volumes.add((Volume) child);
+			}
+		}
+		return volumes;
+	}
+
+	@Override
+	public String toString(boolean preserveState) {
+		return super.toString(preserveState) + "VolumeSystem [\t" + "blockSize " + blockSize + "\t" + "imgOffset " + imgOffset + "\t" + "type " + type + "]\t";
 	}
 }

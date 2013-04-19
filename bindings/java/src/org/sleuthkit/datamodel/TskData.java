@@ -42,11 +42,11 @@ public class TskData {
 		WHT(9, "w"),       ///< Whiteout (openbsd)
 		VIRT(10, "v");     ///< Special (TSK added "Virtual" files)
 
-		private long dir_type;
+		private short dirType;
 		String label;
 
-		private TSK_FS_NAME_TYPE_ENUM(long type, String label){
-			this.dir_type = type;
+		private TSK_FS_NAME_TYPE_ENUM(int type, String label){
+			this.dirType = (short)type;
 			this.label = label;
 		}
 
@@ -54,8 +54,8 @@ public class TskData {
 		 * Get dir type 
 		 * @return the dir type long value
 		 */
-		public long getDirType(){
-			return dir_type;
+		public short getValue(){
+			return dirType;
 		}
 		
 		/**
@@ -67,75 +67,107 @@ public class TskData {
 		}
 		
 		/**
-		 * Convert to the enum type from the long value
+		 * Convert to the enum type from the short value
 		 * @param dir_type enum type value to convert
 		 * @return converted long value
 		 */
-		static public TSK_FS_NAME_TYPE_ENUM fromType(long dir_type) {
+		static public TSK_FS_NAME_TYPE_ENUM valueOf(short dir_type) {
 			for (TSK_FS_NAME_TYPE_ENUM v : TSK_FS_NAME_TYPE_ENUM.values()) {
-				if (v.dir_type == dir_type) {
+				if (v.dirType == dir_type) {
 					return v;
 				}
 			}
 			throw new IllegalArgumentException("No TSK_FS_NAME_TYPE_ENUM matching type: " + dir_type);
 		}
 	}
-
-
 	
 	/**
 	 * Meta Type
 	 */
 	public enum TSK_FS_META_TYPE_ENUM {
-		TSK_FS_META_TYPE_UNDEF(0),
-		TSK_FS_META_TYPE_REG(1),        ///< Regular file
-		TSK_FS_META_TYPE_DIR(2),        ///< Directory file
-		TSK_FS_META_TYPE_FIFO(3),       ///< Named pipe (fifo)
-		TSK_FS_META_TYPE_CHR(4),        ///< Character device
-		TSK_FS_META_TYPE_BLK(5),        ///< Block device
-		TSK_FS_META_TYPE_LNK(6),        ///< Symbolic link
-		TSK_FS_META_TYPE_SHAD(7),       ///< SOLARIS ONLY
-		TSK_FS_META_TYPE_SOCK(8),       ///< UNIX domain socket
-		TSK_FS_META_TYPE_WHT(9),        ///< Whiteout
-		TSK_FS_META_TYPE_VIRT(10),      ///< "Virtual File" created by TSK for file system areas
-		TSK_FS_META_TYPE_STR_MAX(11);   ///< Number of file types in shortname array
+		TSK_FS_META_TYPE_UNDEF(0, "-"),
+		TSK_FS_META_TYPE_REG(1, "r"),        ///< Regular file
+		TSK_FS_META_TYPE_DIR(2, "d"),        ///< Directory file
+		TSK_FS_META_TYPE_FIFO(3, "p"),       ///< Named pipe (fifo)
+		TSK_FS_META_TYPE_CHR(4, "c"),        ///< Character device
+		TSK_FS_META_TYPE_BLK(5, "b"),        ///< Block device
+		TSK_FS_META_TYPE_LNK(6, "l"),        ///< Symbolic link
+		TSK_FS_META_TYPE_SHAD(7, "s"),       ///< SOLARIS ONLY
+		TSK_FS_META_TYPE_SOCK(8, "h"),       ///< UNIX domain socket
+		TSK_FS_META_TYPE_WHT(9, "w"),        ///< Whiteout
+		TSK_FS_META_TYPE_VIRT(10, "v");      ///< "Virtual File" created by TSK for file system areas
 
-		private long meta_type;
+		private short metaType;
+		private String metaTypeStr;
 
-		private TSK_FS_META_TYPE_ENUM(long type){
-			meta_type = type;
+		private TSK_FS_META_TYPE_ENUM(int type, String metaTypeStr) {
+			this.metaType = (short)type;
+			this.metaTypeStr = metaTypeStr;
 		}
 
 		/**
-		 * Get meta type long value
+		 * Get meta type short value
 		 * @return the meta type long value
 		 */
-		public long getMetaType(){
-			return meta_type;
+		public short getValue(){
+			return metaType;
+		}
+		
+		@Override
+		public String toString() {
+			return metaTypeStr;
+		}
+		
+		public static TSK_FS_META_TYPE_ENUM ValueOf(short metaType) {
+			for (TSK_FS_META_TYPE_ENUM type : TSK_FS_META_TYPE_ENUM.values()) {
+				if (type.getValue() == metaType) {
+					return type;
+				}
+			}
+			throw new IllegalArgumentException("No TSK_FS_META_TYPE_ENUM of value: " + metaType);
 		}
 	}
-
-	public static String[] tsk_fs_meta_type_str = { "-", "r", "d", "p", "c", "b", "l", "s", "h", "w", "v"};
 
 	/**
 	 * FS Flags
 	 */
 	public enum TSK_FS_NAME_FLAG_ENUM {
-		TSK_FS_NAME_FLAG_ALLOC(1),      ///< Name is in an allocated state
-		TSK_FS_NAME_FLAG_UNALLOC(2);    ///< Name is in an unallocated state
+		ALLOC(1, "Allocated"),      ///< Name is in an allocated state
+		UNALLOC(2, "Unallocated");    ///< Name is in an unallocated state
 
-		private long dir_flag;
+		private short dirFlag;
+		private String dirFlagStr;
 
-		private TSK_FS_NAME_FLAG_ENUM(long flag){
-			dir_flag = flag;
+		private TSK_FS_NAME_FLAG_ENUM(int flag, String dirFlagStr){
+			this.dirFlag = (short)flag;
+			this.dirFlagStr = dirFlagStr;
 		}
 
 		/**
-		 * Get long value of the flag
+		 * Get short value of the flag
 		 * @return the long flag value
 		 */
-		public long getDirFlag(){
-			return dir_flag;
+		public short getValue(){
+			return dirFlag;
+		}
+		
+		@Override
+		public String toString() {
+			return dirFlagStr;
+		}
+		
+		/**
+		 * Convert dirFlag int value to the enum type
+		 * @param dirFlag int value to convert
+		 * @return the enum type corresponding to dirFlag
+		 */
+		public static TSK_FS_NAME_FLAG_ENUM valueOf(int dirFlag) {
+			for(TSK_FS_NAME_FLAG_ENUM flag : TSK_FS_NAME_FLAG_ENUM.values()) {
+				if(flag.dirFlag == dirFlag) {
+					return flag;
+				}
+			}
+			throw new IllegalArgumentException("No TSK_FS_NAME_FLAG_ENUM of value: " + dirFlag);
 		}
 	}
 
@@ -146,25 +178,25 @@ public class TskData {
 	 */
 	public enum TSK_FS_META_FLAG_ENUM {
 		ALLOC(1, "Allocated"),      ///< Metadata structure is currently in an allocated state
-		UNALLOC(2, "Unallocated"),    ///< Metadata structure is currently in an unallocated state
-		USED(4, "Used"),       ///< Metadata structure has been allocated at least once
-		UNUSED(8, "Unused"),     ///< Metadata structure has never been allocated.
-		COMP(16, "Compressed"),      ///< The file contents are compressed.
-		ORPHAN(32, "Orphan");    ///< Return only metadata structures that have no file name pointing to the (inode_walk flag only)
+		UNALLOC(2, "Unallocated"),  ///< Metadata structure is currently in an unallocated state
+		USED(4, "Used"),            ///< Metadata structure has been allocated at least once
+		UNUSED(8, "Unused"),        ///< Metadata structure has never been allocated.
+		COMP(16, "Compressed"),     ///< The file contents are compressed.
+		ORPHAN(32, "Orphan");       ///< Return only metadata structures that have no file name pointing to the (inode_walk flag only)
 
-		private long meta_flag;
+		private short meta_flag;
 		private String label;
 
-		private TSK_FS_META_FLAG_ENUM(long flag, String label){
-			this.meta_flag = flag;
+		private TSK_FS_META_FLAG_ENUM(int flag, String label){
+			this.meta_flag = (short)flag;
 			this.label = label;
 		}
 
 		/**
-		 * Get meta flags long value
+		 * Get meta flags short value
 		 * @return the long value of meta flags
 		 */
-		public long getMetaFlag(){
+		public short getValue(){
 			return meta_flag;
 		}
 		
@@ -173,30 +205,94 @@ public class TskData {
 		 * Get string label of the metal flags
 		 * @return string meta flags label
 		 */
-		public String getLabel(){
+		@Override
+		public String toString(){
 			return label;
 		}
 		
 		
 		/**
 		 * Returns all the enum elements that match the flags in metaFlag
-		 * @param metaFlag
+		 * @param metaFlags Flags to convert to Enums. 
 		 * @return matching TSK_FS_META_FLAG_ENUM elements
 		 */
-		public static Set<TSK_FS_META_FLAG_ENUM> getFlags(long metaFlag) {
+		public static Set<TSK_FS_META_FLAG_ENUM> valuesOf(short metaFlags) {
 			Set<TSK_FS_META_FLAG_ENUM> matchedFlags = EnumSet.noneOf(TSK_FS_META_FLAG_ENUM.class);
 			
 			for (TSK_FS_META_FLAG_ENUM v : TSK_FS_META_FLAG_ENUM.values()) {
-				long flag = v.getMetaFlag();
+				long flag = v.getValue();
 
-				if((metaFlag & flag) == flag){
+				if((metaFlags & flag) == flag){
 					matchedFlags.add(v);
 				}
 			}
 		
 			return matchedFlags;
 		}
+		
+		public static short toInt(Set<TSK_FS_META_FLAG_ENUM> metaFlags) {
+			short val = 0;
+			for (TSK_FS_META_FLAG_ENUM flag : metaFlags) {
+				val |= flag.getValue();
+			}
+			return val;
+		}
+		
 	}
+	
+	/**
+    * These are based on the NTFS type values. 
+     * Added types for HFS+.
+    */
+    public enum TSK_FS_ATTR_TYPE_ENUM {
+        TSK_FS_ATTR_TYPE_NOT_FOUND(0x00),      // 0
+        TSK_FS_ATTR_TYPE_DEFAULT(0x01),        // 1
+        TSK_FS_ATTR_TYPE_NTFS_SI(0x10),        // 16
+        TSK_FS_ATTR_TYPE_NTFS_ATTRLIST(0x20),  // 32
+        TSK_FS_ATTR_TYPE_NTFS_FNAME(0x30),     // 48
+        TSK_FS_ATTR_TYPE_NTFS_VVER(0x40),      // 64 (NT)
+        TSK_FS_ATTR_TYPE_NTFS_OBJID(0x40),     // 64 (2K)
+        TSK_FS_ATTR_TYPE_NTFS_SEC(0x50),       // 80
+        TSK_FS_ATTR_TYPE_NTFS_VNAME(0x60),     // 96
+        TSK_FS_ATTR_TYPE_NTFS_VINFO(0x70),     // 112
+        TSK_FS_ATTR_TYPE_NTFS_DATA(0x80),      // 128
+        TSK_FS_ATTR_TYPE_NTFS_IDXROOT(0x90),   // 144
+        TSK_FS_ATTR_TYPE_NTFS_IDXALLOC(0xA0),  // 160
+        TSK_FS_ATTR_TYPE_NTFS_BITMAP(0xB0),    // 176
+        TSK_FS_ATTR_TYPE_NTFS_SYMLNK(0xC0),    // 192 (NT)
+        TSK_FS_ATTR_TYPE_NTFS_REPARSE(0xC0),   // 192 (2K)
+        TSK_FS_ATTR_TYPE_NTFS_EAINFO(0xD0),    // 208
+        TSK_FS_ATTR_TYPE_NTFS_EA(0xE0),        // 224
+        TSK_FS_ATTR_TYPE_NTFS_PROP(0xF0),      //  (NT)
+        TSK_FS_ATTR_TYPE_NTFS_LOG(0x100),      //  (2K)
+        TSK_FS_ATTR_TYPE_UNIX_INDIR(0x1001),   //  Indirect blocks for UFS and ExtX file systems
+
+        // Types for HFS+ File Attributes
+        TSK_FS_ATTR_TYPE_HFS_DEFAULT(0x01),    // 1    Data fork of fs special files and misc
+        TSK_FS_ATTR_TYPE_HFS_DATA(0x1100),     // 4352 Data fork of regular files
+        TSK_FS_ATTR_TYPE_HFS_RSRC(0x1101),     // 4353 Resource fork of regular files
+        TSK_FS_ATTR_TYPE_HFS_EXT_ATTR(0x1102), // 4354 Extended Attributes) except compression records
+        TSK_FS_ATTR_TYPE_HFS_COMP_REC(0x1103); // 4355 Compression records
+		
+		private int val;
+		
+		private TSK_FS_ATTR_TYPE_ENUM(int val) {
+			this.val = val;
+		}
+
+		public int getValue() {
+			return val;
+		}
+		
+		public static TSK_FS_ATTR_TYPE_ENUM valueOf(int val) {
+			for(TSK_FS_ATTR_TYPE_ENUM type : TSK_FS_ATTR_TYPE_ENUM.values()) {
+				if(type.val == val) {
+					return type;
+				}
+			}
+			throw new IllegalArgumentException("No TSK_FS_ATTR_TYPE_ENUM of value: " + val);
+		}
+    };
 
 	/**
 	 * Volume system flags
@@ -243,20 +339,108 @@ public class TskData {
 		TSK_FS_META_MODE_IWOTH(0000002),       ///< W for other
 		TSK_FS_META_MODE_IXOTH(0000001);       ///< X for other
 
-		private long mode;
+		private short mode;
 
-		private TSK_FS_META_MODE_ENUM(long mode){
-			this.mode = mode;
+		private TSK_FS_META_MODE_ENUM(int mode){
+			this.mode = (short)mode;
 		}
 
 		/**
-		 * Get long value of the meta mode
+		 * Get short value of the meta mode
 		 * @return the long value of the meta mode
 		 */
-		public long getMode(){
+		public short getMode(){
 			return mode;
 		}
+		
+		/**
+		 * Returns all the TSK_FS_META_MODE_ENUM enum elements that match the given modes
+		 * @param modes
+		 * @return matching TSK_FS_META_MODE_ENUM elements
+		 */
+		public static Set<TSK_FS_META_MODE_ENUM> valuesOf(short modes) {
+			Set<TSK_FS_META_MODE_ENUM> matchedFlags = EnumSet.noneOf(TSK_FS_META_MODE_ENUM.class);
+			
+			for (TSK_FS_META_MODE_ENUM v : TSK_FS_META_MODE_ENUM.values()) {
+				long flag = v.getMode();
+
+				if((modes & flag) == flag){
+					matchedFlags.add(v);
+				}
+			}
+		
+			return matchedFlags;
+		}
+		
+		/**
+		 * @param modes the set of modes to convert
+		 * @return the short int representing the given set of modes
+		 */
+		public static short toInt(Set<TSK_FS_META_MODE_ENUM> modes) {
+			short modesInt = 0;
+			for (TSK_FS_META_MODE_ENUM mode : modes) {
+				modesInt |= mode.getMode();
+			}
+			return modesInt;
+		}
 	};
+	
+	/**
+	 * File system type enum
+	 */
+	 public enum TSK_FS_TYPE_ENUM {
+        TSK_FS_TYPE_DETECT(0x00000000),        ///< Use autodetection methods
+        TSK_FS_TYPE_NTFS (0x00000001),  ///< NTFS file system
+        TSK_FS_TYPE_NTFS_DETECT (0x00000001),   ///< NTFS auto detection
+        TSK_FS_TYPE_FAT12 (0x00000002), ///< FAT12 file system
+        TSK_FS_TYPE_FAT16 (0x00000004), ///< FAT16 file system
+        TSK_FS_TYPE_FAT32 (0x00000008), ///< FAT32 file system
+        TSK_FS_TYPE_FAT_DETECT (0x0000000e),    ///< FAT auto detection
+        TSK_FS_TYPE_FFS1 (0x00000010),  ///< UFS1 (FreeBSD, OpenBSD, BSDI ...)
+        TSK_FS_TYPE_FFS1B (0x00000020), ///< UFS1b (Solaris - has no type)
+        TSK_FS_TYPE_FFS2 (0x00000040),  ///< UFS2 - FreeBSD, NetBSD 
+        TSK_FS_TYPE_FFS_DETECT (0x00000070),    ///< UFS auto detection
+        TSK_FS_TYPE_EXT2 (0x00000080),  ///< Ext2 file system
+        TSK_FS_TYPE_EXT3 (0x00000100),  ///< Ext3 file system
+        TSK_FS_TYPE_EXT_DETECT (0x00000180),    ///< ExtX auto detection
+        TSK_FS_TYPE_SWAP (0x00000200),  ///< SWAP file system
+        TSK_FS_TYPE_SWAP_DETECT (0x00000200),   ///< SWAP auto detection
+        TSK_FS_TYPE_RAW (0x00000400),   ///< RAW file system
+        TSK_FS_TYPE_RAW_DETECT (0x00000400),    ///< RAW auto detection
+        TSK_FS_TYPE_ISO9660 (0x00000800),       ///< ISO9660 file system
+        TSK_FS_TYPE_ISO9660_DETECT (0x00000800),        ///< ISO9660 auto detection
+        TSK_FS_TYPE_HFS (0x00001000),   ///< HFS file system
+        TSK_FS_TYPE_HFS_DETECT (0x00001000),    ///< HFS auto detection
+        TSK_FS_TYPE_UNSUPP (0xffffffff);        ///< Unsupported file system
+		
+		private int value;
+		private TSK_FS_TYPE_ENUM(int value) {
+			this.value = value;
+		}
+		
+		/**
+		 * get the value for the enum type
+		 * @return int value for the enum type
+		 */
+		public int getValue() {
+			return value;
+		}
+		
+		/**
+		 * Convert fs type int value to the enum type - get the first matching enum type
+		 * @param fsTypeValue int value to convert
+		 * @return the enum type - first enum type matching the fsTypeValue
+		 */
+		public static TSK_FS_TYPE_ENUM valueOf(int fsTypeValue) {
+			for(TSK_FS_TYPE_ENUM type : TSK_FS_TYPE_ENUM.values()) {
+				if(type.value == fsTypeValue) {
+					return type;
+				}
+			}
+			throw new IllegalArgumentException("No TSK_FS_TYPE_ENUM of value: " + fsTypeValue);
+		}
+		
+    };
 
 	/**
 	 * Image type
@@ -328,27 +512,27 @@ public class TskData {
 		ABSTRACTFILE(4);
 
 		
-		private long objectType;
+		private short objectType;
 		
-		private ObjectType(long objectType) {
-			this.objectType = objectType;
+		private ObjectType(int objectType) {
+			this.objectType = (short)objectType;
 		}
 		
 		/**
-		 * Get long value of the object type
+		 * Get short value of the object type
 		 * @return the long value of the object type
 		 */
-		public long getObjectType(){
+		public short getObjectType(){
 			return objectType;
 		}
 		
 		
 		/**
-		 * Convert object type long value to the enum type
+		 * Convert object type short value to the enum type
 		 * @param objectType long value to convert
 		 * @return the enum type
 		 */
-		public static ObjectType valueOf(long objectType) {
+		public static ObjectType valueOf(short objectType) {
 			for (ObjectType v : ObjectType.values()) {
 				if (v.objectType == objectType) {
 					return v;
@@ -372,19 +556,19 @@ public class TskData {
 		VIRTUAL_DIR(6), ///< Virtual directory (not on fs) with no meta-data entry that can be used to group files of types other than TSK_DB_FILES_TYPE_FS. Its parent is either another TSK_DB_FILES_TYPE_FS or a root directory or type TSK_DB_FILES_TYPE_FS.
 		;
 		
-		private long fileType;
+		private short fileType;
 		
-		private TSK_DB_FILES_TYPE_ENUM(long fileType) {
-			this.fileType = fileType;
+		private TSK_DB_FILES_TYPE_ENUM(int fileType) {
+			this.fileType = (short)fileType;
 		}
 		
 		
 		/**
-		 * Convert db files type long value to the enum type
+		 * Convert db files type short value to the enum type
 		 * @param fileType long value to convert
 		 * @return the enum type
 		 */
-		public static TSK_DB_FILES_TYPE_ENUM valueOf(long fileType) {
+		public static TSK_DB_FILES_TYPE_ENUM valueOf(short fileType) {
 			for(TSK_DB_FILES_TYPE_ENUM type : TSK_DB_FILES_TYPE_ENUM.values()) {
 				if(type.fileType == fileType) {
 					return type;
@@ -395,10 +579,10 @@ public class TskData {
 		
 		
 		/**
-		 * Get long value of the file type
+		 * Get short value of the file type
 		 * @return the long value of the file type
 		 */
-		public long getFileType() {
+		public short getFileType() {
 			return fileType;
 		}
 	}
@@ -412,21 +596,21 @@ public class TskData {
 		KNOWN(1, "known"),  ///< File marked as a known by hash db
 		BAD(2, "known bad"); ///< File marked as known and bad/notable/interesting by hash db
 		
-		private long known;
+		private byte known;
 		private String name;
 		
-		private FileKnown(long known, String name) {
-			this.known = known;
+		private FileKnown(int known, String name) {
+			this.known = (byte)known;
 			this.name = name;
 		}
 		
 		
 		/**
-		 * Convert file known type long value to the enum type
+		 * Convert file known type byte value to the enum type
 		 * @param known long value to convert
 		 * @return the enum type
 		 */
-		public static FileKnown valueOf(long known) {
+		public static FileKnown valueOf(byte known) {
 			for (FileKnown v : FileKnown.values()) {
 				if (v.known == known) {
 					return v;
@@ -441,13 +625,11 @@ public class TskData {
 		}
 		
 		/**
-		 * Get long value of the file known status
+		 * Get byte value of the file known status
 		 * @return the long value of the file known status
 		 */
-		public long toLong() {
+		public byte getFileKnownValue() {
 			return this.known;
 		}
 	}
-	
-
 }

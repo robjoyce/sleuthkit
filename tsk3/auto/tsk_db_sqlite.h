@@ -37,18 +37,18 @@ typedef struct sqlite3 sqlite3;
 
 
 /**
- * Values for the object type value.
+ * Values for the type column in the tsk_objects table. 
  */
 typedef enum {
-    TSK_DB_OBJECT_TYPE_IMG = 0,
-    TSK_DB_OBJECT_TYPE_VS,
-    TSK_DB_OBJECT_TYPE_VOL,
-    TSK_DB_OBJECT_TYPE_FS,
-    TSK_DB_OBJECT_TYPE_FILE,
+    TSK_DB_OBJECT_TYPE_IMG = 0, ///< Object is a disk image
+    TSK_DB_OBJECT_TYPE_VS,      ///< Object is a volume system. 
+    TSK_DB_OBJECT_TYPE_VOL,     ///< Object is a volume 
+    TSK_DB_OBJECT_TYPE_FS,      ///< Object is a file system
+    TSK_DB_OBJECT_TYPE_FILE,    ///< Object is a file (exact type can be determined in the tsk_files table via TSK_DB_FILES_TYPE_ENUM)
 } TSK_DB_OBJECT_TYPE_ENUM;
 
 /**
- * Values for the files type column in the files table.
+ * Values for the files type column in the tsk_files table.
  */
 typedef enum {
     TSK_DB_FILES_TYPE_FS = 0,   ///< File that can be found in file system tree. 
@@ -63,12 +63,13 @@ typedef enum {
 
 
 /**
-* Values for the "known" column of the files table
+* Values for the "known" column of the tsk_files table
 */
 typedef enum  {
     TSK_DB_FILES_KNOWN_UNKNOWN = 0,  ///< Not matched against an index
-    TSK_DB_FILES_KNOWN_KNOWN = 1,    ///< Match found in NSRL "known" file index
-    TSK_DB_FILES_KNOWN_KNOWN_BAD = 2,      ///< Match found in "known bad" index
+    TSK_DB_FILES_KNOWN_KNOWN = 1,    ///< Match found in a "known" file index (such as NIST NSRL)and could be good or bad.  
+    TSK_DB_FILES_KNOWN_KNOWN_BAD = 2,      ///< Match found in a "known bad" index
+    TSK_DB_FILES_KNOWN_KNOWN_GOOD = 3,      ///< Match found in a "known good" index
 } TSK_DB_FILES_KNOWN_ENUM;
 
 
@@ -237,7 +238,7 @@ class TskDbSqlite {
     TSK_TCHAR m_dbFilePath[1024];
     char m_dbFilePathUtf8[1024];
     bool m_blkMapFlag;
-    bool m_utf8;
+    bool m_utf8; //encoding used for the database file name, not the actual database
     sqlite3_stmt *m_selectFilePreparedStmt;
     map<int64_t, map<TSK_INUM_T,int64_t> > m_parentDirIdCache; //maps a file system ID to a map, which maps a directory file system meta address to its object ID in the database
 };

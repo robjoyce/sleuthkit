@@ -67,6 +67,7 @@ public:
     virtual uint64_t getFileId(int fsId, uint64_t fs_file_id) const;
     virtual int getFileRecord(const uint64_t fileId, TskFileRecord& fileRecord) const;
     virtual SectorRuns * getFileSectors(uint64_t fileId) const;
+    virtual std::string getImageBaseName() const;
     virtual std::vector<std::wstring> getImageNames() const;
     virtual int getFileUniqueIdentifiers(uint64_t a_fileId, uint64_t &a_fsOffset, uint64_t &a_fsFileId, int &a_attrType, int &a_attrId) const;
     virtual int getNumVolumes() const;
@@ -93,6 +94,7 @@ public:
     virtual int getFileCount(std::string& condition) const;
 
     virtual std::map<uint64_t, std::string> getUniqueCarvedFiles(HASH_TYPE hashType) const;
+    virtual std::vector<TskCarvedFileInfo> getUniqueCarvedFilesInfo(HASH_TYPE hashType) const;
     virtual std::vector<uint64_t> getCarvedFileIds() const;
 
     virtual std::vector<uint64_t> getUniqueFileIds(HASH_TYPE hashType) const;
@@ -152,6 +154,27 @@ private:
     int getFileTypeRecords(std::string& stmt, std::list<TskFileTypeRecord>& fileTypeInfoList) const;
     virtual vector<TskBlackboardArtifact> getArtifactsHelper(uint64_t file_id, int artifactTypeID, string artifactTypeName);
     void getCarvedFileInfo(const std::string& stmt, std::map<uint64_t, std::string>& results) const;
+    
+    /**
+     * A helper function for getUniqueCarvedFilesInfo() that executes a very specific SQL SELECT statement 
+     * assembled by the caller.
+     *
+     * @param stmtToExecute The SQL statement.
+     * @param getHash A flag indicating whether the SELECT includes a hash value.
+     * @param carvedFileInfos[out] The data returned by the query as TskCarvedFileInfo objects.
+     * @return Throws TskException
+     */
+    void getCarvedFileInfo(const std::string &query,  bool getHash, std::vector<TskCarvedFileInfo> &carvedFileInfos) const;
+    
+    /**
+     * Executes an SQL statement.
+     *
+     * @param stmtToExecute The SQL statement.
+     * @param[out] statement The result set as a sqlite3_stmt object, caller should call sqlite3_finalize() on the pointer in case of normal execution. 
+     * @param caller The caller in the form <class_name>::<member_function_name> for error messages.
+     * @return Throws TskException.
+     */
+    void executeStatement(const std::string &stmtToExecute, sqlite3_stmt *&statement, const std::string &caller) const;
 };
 
 #endif

@@ -4,7 +4,7 @@
 
 AC_PREREQ(2.59)
 
-AC_INIT(sleuthkit, 4.0.0)
+AC_INIT(sleuthkit, 4.0.2)
 m4_include([m4/ax_pthread.m4])
 # include the version from 1.12.1. This will work for 
 m4_include([m4/cppunit.m4])
@@ -14,7 +14,7 @@ m4_include([m4/ac_prog_javac.m4])
 
 
 AC_CONFIG_SRCDIR([tsk3/base/tsk_base.h])
-AM_CONFIG_HEADER([tsk3/tsk_config.h])
+AC_CONFIG_HEADERS([tsk3/tsk_config.h])
 AC_CONFIG_AUX_DIR(config)
 AM_INIT_AUTOMAKE([foreign])
 AM_PATH_CPPUNIT(1.12.1)
@@ -38,7 +38,7 @@ AC_HEADER_STDC
 #AC_HEADER_MAJOR
 #AC_HEADER_SYS_WAIT
 #AC_CHECK_HEADERS([fcntl.h inttypes.h limits.h locale.h memory.h netinet/in.h stdint.h stdlib.h string.h sys/ioctl.h sys/param.h sys/time.h unistd.h utime.h wchar.h wctype.h])
-AC_CHECK_HEADERS([inttypes.h unistd.h sys/param.h])
+AC_CHECK_HEADERS([err.h inttypes.h unistd.h stdint.h sys/param.h])
 
 # Checks for typedefs, structures, and compiler characteristics.
 AC_HEADER_STDBOOL
@@ -73,6 +73,7 @@ AC_FUNC_SELECT_ARGTYPES
 AC_FUNC_UTIME_NULL
 AC_FUNC_VPRINTF
 #AC_CHECK_FUNCS([dup2 gethostname isascii iswprint memset munmap regcomp select setlocale strcasecmp strchr strdup strerror strndup strrchr strtol strtoul strtoull utime wcwidth])
+AC_CHECK_FUNCS([ishexnumber err errx warn warnx vasprintf])
 AX_PTHREAD( [
             AC_DEFINE(HAVE_PTHREAD,1,[Define if you have POSIX threads libraries and header files.])
             CLIBS="$PTHREAD_LIBS $LIBS"
@@ -180,7 +181,7 @@ AS_IF([test "x$with_libewf" != "xno"],
     )]
     # Check for the header file first to make sure they have the dev install
     [AC_CHECK_HEADERS([libewf.h],
-      [AC_CHECK_LIB([ewf], [libewf_open])]
+      [AC_CHECK_LIB([ewf], [libewf_get_version])]
     )]
 )
 
@@ -222,7 +223,7 @@ AC_CONFIG_COMMANDS([tsk3/tsk_incs.h],
           fi
 
           if test x$ax_pthread_ok = xyes; then
-            echo "#define TSK_MULTITHREAD_LIB" >> tsk3/tsk_incs.h
+            echo "#define TSK_MULTITHREAD_LIB // set because we have pthreads" >> tsk3/tsk_incs.h
           fi
 
           echo "" >> tsk3/tsk_incs.h
@@ -252,6 +253,9 @@ AC_CONFIG_FILES([Makefile
                  tools/autotools/Makefile
                  tools/sorter/Makefile
                  tools/timeline/Makefile
+		 tools/fiwalk/Makefile
+		 tools/fiwalk/src/Makefile
+		 tools/fiwalk/plugins/Makefile
                  tests/Makefile
                  samples/Makefile
                  man/Makefile

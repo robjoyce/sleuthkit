@@ -74,7 +74,8 @@ extern "C" {
         TSK_FS_BLOCK_FLAG_RAW = 0x0020, ///< The data has been read raw from the disk (and not COMP or SPARSE)
         TSK_FS_BLOCK_FLAG_SPARSE = 0x0040,      ///< The data passed in the file_walk calback was stored as sparse (all zeros) (and not RAW or COMP)
         TSK_FS_BLOCK_FLAG_COMP = 0x0080,        ///< The data passed in the file_walk callback was stored in a compressed form (and not RAW or SPARSE)
-        TSK_FS_BLOCK_FLAG_RES = 0x0100  ///< The data passed in the file_walk callback is from an NTFS resident file
+        TSK_FS_BLOCK_FLAG_RES = 0x0100,  ///< The data passed in the file_walk callback is from an NTFS resident file
+        TSK_FS_BLOCK_FLAG_AONLY = 0x0200    /// < The buffer in TSK_FS_BLOCK has no content (it could be non-empty, but should be ignored), but the flags and such are accurate
     };
     typedef enum TSK_FS_BLOCK_FLAG_ENUM TSK_FS_BLOCK_FLAG_ENUM;
 
@@ -88,6 +89,7 @@ extern "C" {
         TSK_FS_BLOCK_WALK_FLAG_UNALLOC = 0x02,  ///< Unallocated blocks
         TSK_FS_BLOCK_WALK_FLAG_CONT = 0x04,     ///< Blocks that could store file content
         TSK_FS_BLOCK_WALK_FLAG_META = 0x08,     ///< Blocks that could store file system metadata
+        TSK_FS_BLOCK_WALK_FLAG_AONLY = 0x10      ///< Do not include content in callback only address and allocation status
     };
     typedef enum TSK_FS_BLOCK_WALK_FLAG_ENUM TSK_FS_BLOCK_WALK_FLAG_ENUM;
 
@@ -120,6 +122,9 @@ extern "C" {
     extern void tsk_fs_block_free(TSK_FS_BLOCK * a_fs_block);
     extern TSK_FS_BLOCK *tsk_fs_block_get(TSK_FS_INFO * fs,
         TSK_FS_BLOCK * fs_block, TSK_DADDR_T addr);
+    extern TSK_FS_BLOCK *tsk_fs_block_get_flag(TSK_FS_INFO * a_fs, 
+        TSK_FS_BLOCK * a_fs_block, TSK_DADDR_T a_addr, 
+        TSK_FS_BLOCK_FLAG_ENUM a_flags);
     extern uint8_t tsk_fs_block_walk(TSK_FS_INFO * a_fs,
         TSK_DADDR_T a_start_blk, TSK_DADDR_T a_end_blk,
         TSK_FS_BLOCK_WALK_FLAG_ENUM a_flags, TSK_FS_BLOCK_WALK_CB a_action,
@@ -212,6 +217,7 @@ extern "C" {
      * Added types for HFS+.
     */
     typedef enum {
+        TSK_FS_ATTR_TYPE_NOT_FOUND = 0x00,       // 0
         TSK_FS_ATTR_TYPE_DEFAULT = 0x01,        // 1
         TSK_FS_ATTR_TYPE_NTFS_SI = 0x10,        // 16
         TSK_FS_ATTR_TYPE_NTFS_ATTRLIST = 0x20,  // 32
@@ -272,7 +278,7 @@ extern "C" {
         TSK_FS_ATTR_TYPE_ENUM type;     ///< Type of attribute
         uint16_t id;            ///< Id of attribute
 
-        TSK_OFF_T size;         ///< Size in bytes of attribute (does not include skiplen for non-resident)
+        TSK_OFF_T size;         ///< Size in bytes of the attribute resident and non-resident content (does not include skiplen for non-resident attributes)
 
         /**
         * Data associated with a non-resident file / attribute. 
@@ -982,10 +988,9 @@ extern "C" {
     typedef enum TSK_FS_BLKLS_FLAG_ENUM TSK_FS_BLKLS_FLAG_ENUM;
     extern uint8_t tsk_fs_blkls(TSK_FS_INFO * fs,
         TSK_FS_BLKLS_FLAG_ENUM lclflags, TSK_DADDR_T bstart,
-        TSK_DADDR_T bend, TSK_FS_BLOCK_FLAG_ENUM flags);
+        TSK_DADDR_T bend, TSK_FS_BLOCK_WALK_FLAG_ENUM flags);
 
-    extern uint8_t tsk_fs_blkstat(TSK_FS_INFO * fs, TSK_DADDR_T addr,
-        TSK_FS_BLOCK_FLAG_ENUM flags);
+    extern uint8_t tsk_fs_blkstat(TSK_FS_INFO * fs, TSK_DADDR_T addr);
 
     enum TSK_FS_FFIND_FLAG_ENUM {
         TSK_FS_FFIND_ALL = 0x01,
@@ -2541,12 +2546,12 @@ class TskFsMeta {
 
     /**
           * get sequence number for file (NTFS only, is incremented when entry is reallocated) 
-     * @return sequence number for file
+     * @return sequence number for file, or 0xFFFF on error.
      */
     uint32_t getSeq() const {
         if (m_fsMeta != NULL)
             return m_fsMeta->seq;
-        //zli: should we throw err msg
+	return 0xFFFF;
     };
 
     /**
