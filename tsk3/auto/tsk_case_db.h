@@ -48,6 +48,7 @@ class TskAutoDb:public TskAuto {
     virtual TSK_RETVAL_ENUM processFile(TSK_FS_FILE * fs_file,
         const char *path);
     virtual void createBlockMap(bool flag);
+    const std::string getCurDir();
 
     /**
      * Calculate hash values of files and add them to database.
@@ -85,12 +86,15 @@ class TskAutoDb:public TskAuto {
 
   private:
     TskDbSqlite * m_db;
-    int64_t m_curImgId;
-    int64_t m_curVsId;
-    int64_t m_curVolId;
-    int64_t m_curFsId;
-    int64_t m_curFileId;
-    int64_t m_curUnallocDirId;
+    int64_t m_curImgId;     ///< Object ID of image currently being processed
+    int64_t m_curVsId;      ///< Object ID of volume system currently being processed
+    int64_t m_curVolId;     ///< Object ID of volume currently being processed
+    int64_t m_curFsId;      ///< Object ID of file system currently being processed
+    int64_t m_curFileId;    ///< Object ID of file currently being processed
+    int64_t m_curDirId;		///< Object ID of the directory currently being processed
+    int64_t m_curUnallocDirId;	
+    string m_curDirPath;		//< Path of the current directory being processed
+    tsk_lock_t m_curDirPathLock; //< protects concurrent access to m_curDirPath
     string m_curImgTZone;
     bool m_blkMapFlag;
     bool m_fileHashFlag;

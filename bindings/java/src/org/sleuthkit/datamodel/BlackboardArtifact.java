@@ -59,7 +59,11 @@ public class BlackboardArtifact implements SleuthkitVisitableItem {
 		TSK_WEB_SEARCH_QUERY(15, "TSK_WEB_SEARCH_QUERY", "Web Search Engine Queries"), ///< web search engine query extracted from web history
 		TSK_METADATA_EXIF(16, "TSK_METADATA_EXIF", "EXIF Metadata"), ///< EXIF Metadata
 		TSK_TAG_FILE(17, "TSK_TAG_FILE", "File Tags"), ///< tagged files
-		TSK_TAG_ARTIFACT(18, "TSK_TAG_ARTIFACT", "Result Tags"); ///< tagged results/artifacts
+		TSK_TAG_ARTIFACT(18, "TSK_TAG_ARTIFACT", "Result Tags"), ///< tagged results/artifacts
+		TSK_OS_INFO(19, "TSK_OS_INFO", "Operating System Information"), ///< Information pertaining to an operating system.
+		TSK_OS_ACCOUNT(20, "TSK_OS_ACCOUNT", "Operating System User Account"), ///< An operating system user account.
+		TSK_SERVICE_ACCOUNT(21, "TSK_SERVICE_ACCOUNT", "Network Service User Account"), ///< A network service user account.
+        ; 
 		/* SEE ABOVE -- KEEP C++ CODE IN SYNC */
 		private String label;
 		private int typeID;
@@ -228,7 +232,8 @@ public class BlackboardArtifact implements SleuthkitVisitableItem {
 	 * @throws TskException exception thrown if a critical error occurs within tsk core and attributes were not queried
 	 */
 	public List<BlackboardAttribute> getAttributes() throws TskCoreException {
-		return Case.getMatchingAttributes("WHERE artifact_id = " + artifactID);
+		//return Case.getMatchingAttributes("WHERE artifact_id = " + artifactID);
+		return Case.getBlackboardAttributes(this);
 	}
 	
 

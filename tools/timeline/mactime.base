@@ -234,7 +234,7 @@ while ((scalar(@ARGV) > 0) && (($_ = $ARGV[0]) =~ /^-(.)(.*)/)) {
             elsif ($_HAS_DATETIME_TIMEZONE) {
                 my $realtz = 0;
                 foreach ( get_timezone_list() ) {
-                    if ($tz =~ m/$_/i) {
+                    if ($tz =~ m/^$_$/i) {
                         $realtz = $_;
                         last;
                     }
@@ -599,7 +599,12 @@ sub print_tl {
         # above.  We need to fill the empty space with blanks, though.
         #
         if ($old_date_string eq $date_string) {
-            $date_string = " ";
+            if ($iso8601) {
+                $date_string = "                    ";
+            }
+            else {
+                $date_string = "                        ";
+            }
             $prev_cnt++
               if ($INDEX ne "");
         }
