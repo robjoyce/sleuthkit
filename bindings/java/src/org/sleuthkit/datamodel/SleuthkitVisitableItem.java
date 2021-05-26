@@ -1,5 +1,5 @@
 /*
- * Autopsy Forensic Browser
+ * Sleuth Kit Data Model
  * 
  * Copyright 2011 Basis Technology Corp.
  * Contact: carrier <at> sleuthkit <dot> org
@@ -23,11 +23,13 @@ package org.sleuthkit.datamodel;
  */
 public interface SleuthkitVisitableItem {
 
-    /**
-     * visitor pattern support
-     * @param v visitor
-     * @return visitor return value
-     */
-    public <T> T accept(SleuthkitItemVisitor<T> v);
+	/**
+	 * visitor pattern support
+	 *
+	 * @param v visitor
+	 *
+	 * @return visitor return value
+	 */
+	public <T> T accept(SleuthkitItemVisitor<T> v);
 
 }

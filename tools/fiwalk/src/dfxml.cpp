@@ -17,7 +17,7 @@
  */
 
 
-#include "tsk3/tsk_tools_i.h"
+#include "tsk/tsk_tools_i.h"
 
 #include "dfxml.h"
 #include <errno.h>
@@ -34,6 +34,10 @@ using namespace std;
 #include <assert.h>
 #include <fcntl.h>
 #include <stack>
+
+#ifdef HAVE_SYS_RESOURCE_H
+#include <sys/resource.h>
+#endif
 
 static const char *xml_header = "<?xml version='1.0' encoding='UTF-8'?>\n";
 
@@ -142,7 +146,7 @@ xml::xml():outf(),out(&cout),tags(),tag_stack(),tempfilename(),tempfile_template
 }
 
 /* This should be rewritten so that the temp file is done on close, not on open */
-xml::xml(const std::string &outfilename_,bool makeDTD):
+xml::xml(const std::string &outfilename_, bool /*makeDTD*/):
     outf(outfilename_.c_str(),ios_base::out),
     out(),tags(),tag_stack(),tempfilename(),tempfile_template(outfilename_+"_tmp_XXXXXXXX"),
     t0(),make_dtd(false),outfilename(outfilename_)
@@ -371,6 +375,7 @@ void xml::add_DFXML_execution_environment(const std::string &command_line)
 
 void xml::add_rusage()
 {
+#ifdef HAVE_SYS_RESOURCE_H
 #ifdef HAVE_GETRUSAGE
     struct rusage ru;
     memset(&ru,0,sizeof(ru));
@@ -399,6 +404,7 @@ void xml::add_rusage()
 	xmlout("clocktime",t);
 	pop();
     }
+#endif
 #endif
 }
 
@@ -486,7 +492,7 @@ void xml::add_DFXML_build_environment()
 	xmlout("compilation_date",buf);
     }
 #endif
-#ifdef HAVE_LIBTSK3
+#ifdef HAVE_LIBTSK
     xmlout("library", "", std::string("name=\"tsk\" version=\"") + tsk_version_get_str() + "\"",false);
 #endif
 #ifdef HAVE_LIBAFFLIB

@@ -18,12 +18,14 @@
  */
 
 /* config.h must be first */
-#include "tsk3/tsk_tools_i.h"
+#include "tsk/tsk_tools_i.h"
 #include "fiwalk.h"
 #include "arff.h"
 #include "plugin.h"
 #include "unicode_escape.h"
-#include "tsk3/fs/tsk_fatfs.h"
+#include "tsk/fs/tsk_fatfs.h"
+
+#define MAX_SPARSE_SIZE 1024*1024*64
 
 #ifdef _MSC_VER
 #define _CRT_SECURE_NO_WARNINGS
@@ -65,87 +67,19 @@ file_act(TSK_FS_FILE * fs_file, TSK_OFF_T a_off, TSK_DADDR_T addr, char *buf,
 	 size_t size, TSK_FS_BLOCK_FLAG_ENUM flags, void *ptr)
 {
     content *ci = (content *)ptr;
-
-    if(opt_debug>1){
-	printf("file_act(fs_file=%p,addr=%"PRIuDADDR" buf=%p size=%d)\n",
-	       fs_file,addr,buf,(int)size);
-	if(opt_debug>1 && ci->segs.size()==0){
-	    if(fwrite(buf,size,1,stdout)!=1) err(1,"fwrite");
-	    printf("\n");
-	}
-    }
-
-    if(size==0)  return TSK_WALK_CONT;	// can't do much with this...
-
-    if(opt_no_data==false){
-	if (flags & TSK_FS_BLOCK_FLAG_SPARSE){
-	    /* hash zeros */
-	    ci->set_invalid(true);		// make this data set invalid
-	}
-	else {
-	    ci->add_bytes(buf,a_off,size);	// add these bytes to the file
-	}
-    }
-
-    /* "Address 0 is reserved in ExtX and FFS to denote a "sparse"
-       block (one which is all zeros).  TSK knows this and returns
-       zeros when a file refers to block 0.  You can check the 'flags'
-       argument to the callback to determine if the data is from
-       sparse or compressed data. RAW means that the data in the
-       buffer was read from the disk.
-
-       TSK_FS_BLOCK_FLAG_RAW - data on the disk
-       TSK_FS_BLOCK_FLAG_SPARSE - a whole
-       TSK_FS_BLOCK_FLAG_COMP - the file is compressed
-    */
-
-    uint64_t  fs_offset = (addr)*fs_file->fs_info->block_size;
-    uint64_t img_offset = current_partition_start + fs_offset;
-
-    if(ci->segs.size()>0){
-	/* Does this next segment fit after the prevous segment logically? */
-	if(ci->segs.back().next_file_offset()==(uint64_t)a_off){
-
-	    /* if both the last and the current are sparse, this can be extended. */
-	    if((ci->segs.back().flags & TSK_FS_BLOCK_FLAG_SPARSE) &&
-	       (flags & TSK_FS_BLOCK_FLAG_SPARSE)){
-
-		ci->segs.back().len += size;
-		return TSK_WALK_CONT;
-	    }
-
-
-	    /* If both are compressed, then this can be extended? */
-	    if((ci->segs.back().flags & TSK_FS_BLOCK_FLAG_COMP) &&
-	       (flags & TSK_FS_BLOCK_FLAG_COMP) &&
-	       (ci->segs.back().img_offset + ci->segs.back().len == img_offset)){
-		ci->segs.back().len += size;
-		return TSK_WALK_CONT;
-	    }
-
-	    /* See if we can extend the last segment in the segment list,
-	     * or if this is the start of a new fragment.
-	     */
-	    if((ci->segs.back().flags & TSK_FS_BLOCK_FLAG_RAW) &&
-	       (flags & TSK_FS_BLOCK_FLAG_RAW) &&
-	       (ci->segs.back().img_offset + ci->segs.back().len == img_offset)){
-		ci->segs.back().len += size;
-		return TSK_WALK_CONT;
-	    }
-	}
-    }
-    /* Need to add a new element to the list */
-    ci->add_seg(img_offset,fs_offset,(int64_t)a_off,size,flags);
-    return TSK_WALK_CONT;
+    return ci->file_act(fs_file,a_off,addr,buf,size,flags);
 }
 
-/* This is modeled on print_dent_act printit in ./tsk3/fs/fls_lib.c
- * See also tsk_fs_name_print() in ./tsk3/fs/fs_name.c
+/* This is modeled on print_dent_act printit in ./tsk/fs/fls_lib.c
+ * See also tsk_fs_name_print() in ./tsk/fs/fs_name.c
  */
 
 static uint8_t
 process_tsk_file(TSK_FS_FILE * fs_file, const char *path)
 {
+    /* Use a flag to determine if a file is generically fit for plugins. */
+    bool can_run_plugin;
+
     /* Make sure that the SleuthKit structures are properly set */
     if (fs_file->name == NULL) 
         return 1;
@@ -218,7 +152,7 @@ process_tsk_file(TSK_FS_FILE * fs_file, const char *path)
     if(opt_body_file && (fs_file->meta != NULL)){
 	char ls[64];
 	tsk_fs_meta_make_ls(fs_file->meta,ls,sizeof(ls));
-	fprintf(t,"%s|%s|%"PRId64"|%s|%d|%d|%"PRId64"|%d|%d|%d|%d\n",
+	fprintf(t,"%s|%s|%" PRId64 "|%s|%d|%d|%" PRId64 "|%d|%d|%d|%d\n",
 		ci.h_md5.final().hexdigest().c_str(),ci.filename().c_str(),fs_file->meta->addr,
 		ls,fs_file->meta->uid,fs_file->meta->gid,
 		fs_file->meta->size,
@@ -293,20 +227,19 @@ process_tsk_file(TSK_FS_FILE * fs_file, const char *path)
     	}
         }
     }
-    if(fs_file->meta == NULL)
-    {
-        if(fs_file->name->flags & TSK_FS_META_FLAG_ALLOC)   file_info("alloc",1);
-        if(fs_file->name->flags & TSK_FS_META_FLAG_UNALLOC) file_info("unalloc",1);
-        if(fs_file->name->flags & TSK_FS_META_FLAG_USED)    file_info("used",1);
-        if(fs_file->name->flags & TSK_FS_META_FLAG_UNUSED)  file_info("unused",1);
-        if(fs_file->name->flags & TSK_FS_META_FLAG_ORPHAN)  file_info("orphan",1);
-        if(fs_file->name->flags & TSK_FS_META_FLAG_COMP)    file_info("compressed",1);
+    // fs_file->meta == NULL)
+    else {
+        if(fs_file->name->flags & TSK_FS_NAME_FLAG_ALLOC)   file_info("alloc",1);
+        if(fs_file->name->flags & TSK_FS_NAME_FLAG_UNALLOC) file_info("unalloc",1);
     
+        // @@@ BC: This is a bit confusing.  It seems to be cramming NAME-level info 
+        // into places that typically has META-level info. 
         if (fs_file->name->meta_addr!=0)file_info("inode",fs_file->name->meta_addr);
         file_info("meta_type",fs_file->name->type);
         
         if(fs_file->name->meta_seq!=0) file_info("seq",fs_file->name->meta_seq);
     }
+
     /* Special processing for NTFS */
     if ((TSK_FS_TYPE_ISNTFS(fs_file->fs_info->ftype))){
 	/* Should we cycle through the attributes the way print_dent_act() does? */
@@ -329,24 +262,21 @@ process_tsk_file(TSK_FS_FILE * fs_file, const char *path)
     ci.write_record();
 
 
-    /* Processing for regular files: */
+    /* Processing for regular files and some virtual files: */
+    can_run_plugin = false;
     if(fs_file->name->type == TSK_FS_NAME_TYPE_REG){
-
-	if(ci.do_plugin && ci.total_bytes>0) plugin_process(ci.tempfile_path);
-
-	/* Output the sector hashes to text or XML file if requested */
-//	if(opt_compute_sector_hashes){
-//	    int count = 1;
-//	    for(vector<string>::const_iterator it = ci.sectorhashes.begin();
-//		it!=ci.sectorhashes.end(); it++){
-//		if(opt_print_sector_hashes){
-//		    if(t) fprintf(t,"sectorhash: %s %d\n",(*it).c_str(),count);
-//		    if(x) x->xmlout("sectorhash",*it,"",false);
-//		}
-//		count++;
-//	    }
-//	}
+        can_run_plugin = true;
     }
+    else if(fs_file->name->type == TSK_FS_NAME_TYPE_VIRT){
+        /* Pass some virtual files to plugins, e.g. $MBR for boot sector virus scans. */
+        if(fs_file->name->name){
+            if(strcmp(fs_file->name->name, "$MBR") == 0) {
+                can_run_plugin = true;
+            }
+        }
+    }
+
+    if(can_run_plugin && ci.do_plugin && ci.total_bytes>0) plugin_process(ci.tempfile_path);
 
     /* END of file processing */
     if(x) x->pop();
@@ -361,11 +291,11 @@ process_tsk_file(TSK_FS_FILE * fs_file, const char *path)
  * that is found.
  */
 static TSK_WALK_RET_ENUM
-dir_act(TSK_FS_FILE * fs_file, const char *path, void *ptr)
+dir_act(TSK_FS_FILE * fs_file, const char *path, void * /*ptr*/)
 {
     /* Ignore NTFS System files */
     if (opt_ignore_ntfs_system_files
-	&& (TSK_FS_TYPE_ISNTFS(fs_file->fs_info->ftype))
+	&& (TSK_FS_TYPE_ISNTFS(fs_file->fs_info->ftype) || TSK_FS_TYPE_ISFAT(fs_file->fs_info->ftype))
         && (fs_file->name->name[0] == '$'))
         return TSK_WALK_CONT;
 
@@ -391,7 +321,7 @@ int proc_fs(TSK_IMG_INFO * img_info, TSK_OFF_T start)
     /* Try it as a file system */
     fs_info = tsk_fs_open_img(img_info, start, TSK_FS_TYPE_DETECT);
     if (fs_info == NULL) {
-	comment("TSK_Error '%s' at sector %"PRIuDADDR" offset %"PRIuDADDR" sector_size=%u",
+	comment("TSK_Error '%s' at sector %" PRIuDADDR " offset %" PRIuDADDR " sector_size=%u",
 		tsk_error_get(),start/sector_size,start,sector_size);
 
 	/* We could do some carving on the volume data at this point */
@@ -401,7 +331,7 @@ int proc_fs(TSK_IMG_INFO * img_info, TSK_OFF_T start)
     comment("fs start: %" PRIuDADDR, start);
     if(x){
 	char buf[1024];
-	snprintf(buf,sizeof(buf),"offset='%"PRIuDADDR"'",start);
+	snprintf(buf,sizeof(buf),"offset='%" PRIuDADDR "'",start);
 	x->push("volume",buf);
     }
 
@@ -556,7 +486,7 @@ void process_scalpel_audit_file(TSK_IMG_INFO *img_info,const char *audit_file)
 		    file_info("carvelength",length);
 		}
 
-		ci.add_seg(start,start,0,r2,TSK_FS_BLOCK_FLAG_RAW);	// may not be able to read it all
+		ci.add_seg(start,start,0,r2,TSK_FS_BLOCK_FLAG_RAW,"");	// may not be able to read it all
 		ci.add_bytes(buf2,0,r2);
 		ci.write_record();
 		free(buf2);

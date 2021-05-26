@@ -16,11 +16,14 @@ Tested Platform:
 - SunOS 4-5.*
 - Windows
 
-Build System:
-- C/C++ compiler
+Build System (to compile from a source distribution):
+- C/C++ compiler (C++ 14 required)
 - GNU Make
-- GNU autoconf, automake, and libtool
 - Java compiler / JDK (if you want the java bindings)
+
+Development System (to extend TSK or compile from the repository):
+- GNU autoconf, automake, and libtool
+- Plus the build system requirements
 
 Optional Programs:
 - Autopsy: Provides a graphical HTML-based interface to The
@@ -39,7 +42,16 @@ release.
 
 - LibEWF: Allows you to process disk images that are stored in the
 Expert Witness format (EnCase Format).  Version 20130128 has been
-tested to compile and work with this release. 
+tested to compile and work with this release.   It is the last 
+stable release of libewf and therefore the only one that we 
+currently support.  You can download it from:
+
+    https://github.com/sleuthkit/libewf_64bit
+
+    The official repository is available here, but there is not
+    a package of the last stable release:
+
+    https://github.com/libyal/libewf
     Available at: http://sourceforge.net/projects/libewf/
 
 
@@ -56,7 +68,11 @@ for useful arguments that can be given to 'configure.
 
     $ ./configure
 
-If there were no errors, then run 'make'.
+If there were no errors, then run 'make'.  If you do not have a
+'configure' script, then it is probably because you cloned the
+source code repository. If so, you will need to have automake,
+autoconf, and libtool installed and you can create the configure
+script using the 'bootstrap' script in the root directory. 
 
     $ make
 

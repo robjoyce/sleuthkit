@@ -1,15 +1,15 @@
 /*
- * Autopsy Forensic Browser
- * 
- * Copyright 2011 Basis Technology Corp.
+ * SleuthKit Java Bindings
+ *
+ * Copyright 2011-2020 Basis Technology Corp.
  * Contact: carrier <at> sleuthkit <dot> org
- * 
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *     http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -18,9 +18,20 @@
  */
 package org.sleuthkit.datamodel;
 
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.io.RandomAccessFile;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.text.MessageFormat;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.ResourceBundle;
 import java.util.Set;
+import java.util.SortedSet;
+import java.util.TimeZone;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import org.sleuthkit.datamodel.TskData.FileKnown;
 import org.sleuthkit.datamodel.TskData.TSK_FS_META_FLAG_ENUM;
 import org.sleuthkit.datamodel.TskData.TSK_FS_META_TYPE_ENUM;
@@ -28,9 +39,8 @@ import org.sleuthkit.datamodel.TskData.TSK_FS_NAME_FLAG_ENUM;
 import org.sleuthkit.datamodel.TskData.TSK_FS_NAME_TYPE_ENUM;
 
 /**
- * Common fields methods for objects stored in tsk_files table Abstract files
- * are divided into subtypes defined in TSK_DB_FILES_TYPE_ENUM and further
- * divided into files and directories
+ * An abstract base class for classes that represent files that have been added
+ * to the case.
  */
 public abstract class AbstractFile extends AbstractContent {
 
@@ -41,10 +51,20 @@ public abstract class AbstractFile extends AbstractContent {
 	protected final Set<TSK_FS_META_FLAG_ENUM> metaFlags;
 	protected long size;
 	protected final long metaAddr, ctime, crtime, atime, mtime;
+	protected final int metaSeq;
 	protected final int uid, gid;
-	protected final short attrId;
+	protected final int attrId;
 	protected final TskData.TSK_FS_ATTR_TYPE_ENUM attrType;
 	protected final Set<TskData.TSK_FS_META_MODE_ENUM> modes;
+	//local file support
+	private boolean localPathSet = false; ///< if set by setLocalPath(), reads are done on local file 
+	private String localPath; ///< local path as stored in db tsk_files_path, is relative to the db, 
+	private String localAbsPath; ///< absolute path representation of the local path
+	private volatile RandomAccessFile localFileHandle;
+	private volatile java.io.File localFile;
+	private TskData.EncodingType encodingType;
+	//range support
+	private List<TskFileRange> ranges;
 	/*
 	 * path of parent directory
 	 */
@@ -53,22 +73,38 @@ public abstract class AbstractFile extends AbstractContent {
 	 * knownState status in database
 	 */
 	protected TskData.FileKnown knownState;
+	private boolean knownStateDirty = false;
 	/*
 	 * md5 hash
 	 */
 	protected String md5Hash;
+	private boolean md5HashDirty = false;
+	/*
+	 * SHA-256 hash
+	 */
+	protected String sha256Hash;
+	private boolean sha256HashDirty = false;
+	private String mimeType;
+	private boolean mimeTypeDirty = false;
+	private static final Logger LOGGER = Logger.getLogger(AbstractFile.class.getName());
+	private static final ResourceBundle BUNDLE = ResourceBundle.getBundle("org.sleuthkit.datamodel.Bundle");
+	private long dataSourceObjectId;
+	private final String extension;
 
 	/**
 	 * Initializes common fields used by AbstactFile implementations (objects in
 	 * tsk_files table)
 	 *
-	 * @param db case / db handle where this file belongs to
-	 * @param objId object id in tsk_objects table
+	 * @param db                 case / db handle where this file belongs to
+	 * @param objId              object id in tsk_objects table
+	 * @param dataSourceObjectId The object id of the root data source of this
+	 *                           file.
 	 * @param attrType
 	 * @param attrId
-	 * @param name name field of the file
-	 * @param fileType type of the file
+	 * @param name               name field of the file
+	 * @param fileType           type of the file
 	 * @param metaAddr
+	 * @param metaSeq
 	 * @param dirType
 	 * @param metaType
 	 * @param dirFlag
@@ -81,21 +117,41 @@ public abstract class AbstractFile extends AbstractContent {
 	 * @param modes
 	 * @param uid
 	 * @param gid
-	 * @param md5Hash md5sum of the file, or null or "NULL" if not present
-	 * @param knownState knownState status of the file, or null if unknown
-	 * (default)
+	 * @param md5Hash            md5sum of the file, or null or "NULL" if not
+	 *                           present
+	 * @param sha256Hash         sha256 hash of the file, or null or "NULL" if
+	 *                           not present
+	 * @param knownState         knownState status of the file, or null if
+	 *                           unknown (default)
 	 * @param parentPath
+	 * @param mimeType           The MIME type of the file, can be null.
+	 * @param extension		        The extension part of the file name (not
+	 *                           including the '.'), can be null.
 	 */
-	protected AbstractFile(SleuthkitCase db, long objId, TskData.TSK_FS_ATTR_TYPE_ENUM attrType, short attrId,
-			String name, TskData.TSK_DB_FILES_TYPE_ENUM fileType, long metaAddr,
-			TSK_FS_NAME_TYPE_ENUM dirType, TSK_FS_META_TYPE_ENUM metaType, TSK_FS_NAME_FLAG_ENUM dirFlag, short metaFlags,
-			long size, long ctime, long crtime, long atime, long mtime, short modes, int uid, int gid, String md5Hash, FileKnown knownState,
-			String parentPath) {
+	AbstractFile(SleuthkitCase db,
+			long objId,
+			long dataSourceObjectId,
+			TskData.TSK_FS_ATTR_TYPE_ENUM attrType, int attrId,
+			String name,
+			TskData.TSK_DB_FILES_TYPE_ENUM fileType,
+			long metaAddr, int metaSeq,
+			TSK_FS_NAME_TYPE_ENUM dirType, TSK_FS_META_TYPE_ENUM metaType,
+			TSK_FS_NAME_FLAG_ENUM dirFlag, short metaFlags,
+			long size,
+			long ctime, long crtime, long atime, long mtime,
+			short modes,
+			int uid, int gid,
+			String md5Hash, String sha256Hash, FileKnown knownState,
+			String parentPath,
+			String mimeType,
+			String extension) {
 		super(db, objId, name);
+		this.dataSourceObjectId = dataSourceObjectId;
 		this.attrType = attrType;
 		this.attrId = attrId;
 		this.fileType = fileType;
 		this.metaAddr = metaAddr;
+		this.metaSeq = metaSeq;
 		this.dirType = dirType;
 		this.metaType = metaType;
 		this.dirFlag = dirFlag;
@@ -110,12 +166,16 @@ public abstract class AbstractFile extends AbstractContent {
 		this.modes = TskData.TSK_FS_META_MODE_ENUM.valuesOf(modes);
 
 		this.md5Hash = md5Hash;
+		this.sha256Hash = sha256Hash;
 		if (knownState == null) {
-			this.knownState = FileKnown.UKNOWN;
+			this.knownState = FileKnown.UNKNOWN;
 		} else {
 			this.knownState = knownState;
 		}
 		this.parentPath = parentPath;
+		this.mimeType = mimeType;
+		this.extension = extension == null ? "" : extension;
+		this.encodingType = TskData.EncodingType.NONE;
 	}
 
 	/**
@@ -141,7 +201,7 @@ public abstract class AbstractFile extends AbstractContent {
 	 *
 	 * @return attribute id
 	 */
-	public short getAttrId() {
+	public int getAttributeId() {
 		return attrId;
 	}
 
@@ -155,12 +215,12 @@ public abstract class AbstractFile extends AbstractContent {
 	}
 
 	/**
-	 * Get the change time as Date
+	 * Get the change time as Date (in local timezone)
 	 *
 	 * @return change time as Date
 	 */
 	public String getCtimeAsDate() {
-		return FsContent.epochToTime(ctime);
+		return epochToTime(ctime);
 	}
 
 	/**
@@ -173,12 +233,12 @@ public abstract class AbstractFile extends AbstractContent {
 	}
 
 	/**
-	 * Get the creation time as Date
+	 * Get the creation time as Date (in local timezone)
 	 *
 	 * @return creation time as Date
 	 */
 	public String getCrtimeAsDate() {
-		return FsContent.epochToTime(crtime);
+		return epochToTime(crtime);
 	}
 
 	/**
@@ -191,12 +251,12 @@ public abstract class AbstractFile extends AbstractContent {
 	}
 
 	/**
-	 * Get the access time as Date
+	 * Get the access time as Date (in local timezone)
 	 *
 	 * @return access time as Date
 	 */
 	public String getAtimeAsDate() {
-		return FsContent.epochToTime(atime);
+		return epochToTime(atime);
 	}
 
 	/**
@@ -209,12 +269,12 @@ public abstract class AbstractFile extends AbstractContent {
 	}
 
 	/**
-	 * Get the modified time as Date
+	 * Get the modified time as Date (in local timezone)
 	 *
 	 * @return modified time as Date
 	 */
 	public String getMtimeAsDate() {
-		return FsContent.epochToTime(mtime);
+		return epochToTime(mtime);
 	}
 
 	/**
@@ -242,6 +302,16 @@ public abstract class AbstractFile extends AbstractContent {
 	 */
 	public long getMetaAddr() {
 		return metaAddr;
+	}
+
+	/**
+	 * Get the file meta address sequence. Only useful with NTFS. Incremented
+	 * each time a structure is re-allocated.
+	 *
+	 * @return Address of the meta data structure sequence.
+	 */
+	public long getMetaSeq() {
+		return metaSeq;
 	}
 
 	/**
@@ -274,91 +344,113 @@ public abstract class AbstractFile extends AbstractContent {
 
 		// second and third characters = user permissions
 		if ((mode & irusr) == irusr) {
-			result += "r";
+			result += "r"; //NON-NLS
 		} else {
-			result += "-";
+			result += "-"; //NON-NLS
 		}
 		if ((mode & iwusr) == iwusr) {
-			result += "w";
+			result += "w"; //NON-NLS
 		} else {
-			result += "-";
+			result += "-"; //NON-NLS
 		}
 
 		// fourth character = set uid
 		if ((mode & isuid) == isuid) {
 			if ((mode & ixusr) == ixusr) {
-				result += "s";
+				result += "s"; //NON-NLS
 			} else {
-				result += "S";
+				result += "S"; //NON-NLS
 			}
 		} else {
 			if ((mode & ixusr) == ixusr) {
-				result += "x";
+				result += "x"; //NON-NLS
 			} else {
-				result += "-";
+				result += "-"; //NON-NLS
 			}
 		}
 
 		// fifth and sixth characters = group permissions
 		if ((mode & irgrp) == irgrp) {
-			result += "r";
+			result += "r"; //NON-NLS
 		} else {
-			result += "-";
+			result += "-"; //NON-NLS
 		}
 		if ((mode & iwgrp) == iwgrp) {
-			result += "w";
+			result += "w"; //NON-NLS
 		} else {
-			result += "-";
+			result += "-"; //NON-NLS
 		}
 
 		// seventh character = set gid
 		if ((mode & isgid) == isgid) {
 			if ((mode & ixgrp) == ixgrp) {
-				result += "s";
+				result += "s"; //NON-NLS
 			} else {
-				result += "S";
+				result += "S"; //NON-NLS
 			}
 		} else {
 			if ((mode & ixgrp) == ixgrp) {
-				result += "x";
+				result += "x"; //NON-NLS
 			} else {
-				result += "-";
+				result += "-"; //NON-NLS
 			}
 		}
 
 		// eighth and ninth character = other permissions
 		if ((mode & iroth) == iroth) {
-			result += "r";
+			result += "r"; //NON-NLS
 		} else {
-			result += "-";
+			result += "-"; //NON-NLS
 		}
 		if ((mode & iwoth) == iwoth) {
-			result += "w";
+			result += "w"; //NON-NLS
 		} else {
-			result += "-";
+			result += "-"; //NON-NLS
 		}
 
 		// tenth character = sticky bit
 		if ((mode & isvtx) == isvtx) {
 			if ((mode & ixoth) == ixoth) {
-				result += "t";
+				result += "t"; //NON-NLS
 			} else {
-				result += "T";
+				result += "T"; //NON-NLS
 			}
 		} else {
 			if ((mode & ixoth) == ixoth) {
-				result += "x";
+				result += "x"; //NON-NLS
 			} else {
-				result += "-";
+				result += "-"; //NON-NLS
 			}
 		}
 
 		// check the result
 		if (result.length() != 10) {
 			// throw error here
-			result = "ERROR";
+			result = "ERROR"; //NON-NLS
 		}
 		return result;
+	}
+
+	/**
+	 * Gets the MIME type of this file.
+	 *
+	 * @return The MIME type name or null if the MIME type has not been set.
+	 */
+	public String getMIMEType() {
+		return mimeType;
+	}
+
+	/**
+	 * Sets the MIME type for this file.
+	 *
+	 * IMPORTANT: The MIME type is set for this AbstractFile object, but it is
+	 * not saved to the case database until AbstractFile.save is called.
+	 *
+	 * @param mimeType The MIME type of this file.
+	 */
+	public void setMIMEType(String mimeType) {
+		this.mimeType = mimeType;
+		this.mimeTypeDirty = true;
 	}
 
 	public boolean isModeSet(TskData.TSK_FS_META_MODE_ENUM mode) {
@@ -366,14 +458,16 @@ public abstract class AbstractFile extends AbstractContent {
 	}
 
 	/**
-	 * Sets md5 hash string Note: database or other FsContent objects are not
-	 * updated. Currently only SleuthkiCase calls it to update the object while
-	 * updating tsk_files entry
+	 * Sets the MD5 hash for this file.
 	 *
-	 * @param md5Hash
+	 * IMPORTANT: The MD5 hash is set for this AbstractFile object, but it is
+	 * not saved to the case database until AbstractFile.save is called.
+	 *
+	 * @param md5Hash The MD5 hash of the file.
 	 */
-	void setMd5Hash(String md5Hash) {
+	public void setMd5Hash(String md5Hash) {
 		this.md5Hash = md5Hash;
+		this.md5HashDirty = true;
 	}
 
 	/**
@@ -386,14 +480,46 @@ public abstract class AbstractFile extends AbstractContent {
 	}
 
 	/**
-	 * Sets knownState status Note: database or other file objects are not
-	 * updated. Currently only SleuthkiCase calls it to update the object while
-	 * updating tsk_files entry
+	 * Sets the SHA-256 hash for this file.
 	 *
-	 * @param knownState
+	 * IMPORTANT: The SHA-256 hash is set for this AbstractFile object, but it
+	 * is not saved to the case database until AbstractFile.save is called.
+	 *
+	 * @param sha256Hash The SHA-256 hash of the file.
 	 */
-	void setKnown(TskData.FileKnown known) {
-		this.knownState = known;
+	public void setSha256Hash(String sha256Hash) {
+		this.sha256Hash = sha256Hash;
+		this.sha256HashDirty = true;
+	}
+
+	/**
+	 * Get the SHA-256 hash value as calculated, if present
+	 *
+	 * @return SHA-256 hash string, if it is present or null if it is not
+	 */
+	public String getSha256Hash() {
+		return this.sha256Hash;
+	}
+
+	/**
+	 * Sets the known state for this file. Passed in value will be ignored if it
+	 * is "less" than the current state. A NOTABLE file cannot be downgraded to
+	 * KNOWN.
+	 *
+	 * IMPORTANT: The known state is set for this AbstractFile object, but it is
+	 * not saved to the case database until AbstractFile.save is called.
+	 *
+	 * @param knownState The known state of the file.
+	 */
+	public void setKnown(TskData.FileKnown knownState) {
+		// don't allow them to downgrade the known state
+		if (this.knownState.compareTo(knownState) > 0) {
+			// ideally we'd return some kind of error, but 
+			// the API doesn't allow it
+			return;
+		}
+		this.knownState = knownState;
+		this.knownStateDirty = true;
 	}
 
 	/**
@@ -404,6 +530,17 @@ public abstract class AbstractFile extends AbstractContent {
 	 */
 	public TskData.FileKnown getKnown() {
 		return knownState;
+	}
+
+	/**
+	 * Get the extension part of the filename, if there is one. We assume that
+	 * extensions only have ASCII alphanumeric chars
+	 *
+	 * @return The filename extension in lowercase (not including the period) or
+	 *         empty string if there is no extension
+	 */
+	public String getNameExtension() {
+		return extension;
 	}
 
 	/**
@@ -426,18 +563,143 @@ public abstract class AbstractFile extends AbstractContent {
 	}
 
 	/**
+	 * Gets the data source for this file.
+	 *
+	 * @return The data source.
+	 *
+	 * @throws TskCoreException if there was an error querying the case
+	 *                          database.
+	 *
+	 * To obtain the data source as a DataSource object, use:
+	 * getSleuthkitCase().getDataSource(getDataSourceObjectId());
+	 */
+	@Override
+	public Content getDataSource() throws TskCoreException {
+		return getSleuthkitCase().getContentById(this.dataSourceObjectId);
+	}
+
+	/**
+	 * Gets the object id of the data source for this file.
+	 *
+	 * @return The object id of the data source.
+	 */
+	public long getDataSourceObjectId() {
+		return dataSourceObjectId;
+	}
+
+	/**
 	 * Gets file ranges associated with the file. File ranges are objects in
 	 * tsk_file_layout table Any file type (especially unallocated) may have 1
 	 * or more block ranges associated with it
 	 *
 	 * @return list of file layout ranges
+	 *
 	 * @throws TskCoreException exception thrown if critical error occurred
-	 * within tsk core
+	 *                          within tsk core
 	 */
-	public abstract List<TskFileRange> getRanges() throws TskCoreException;
+	public List<TskFileRange> getRanges() throws TskCoreException {
+		if (ranges == null) {
+			ranges = getSleuthkitCase().getFileRanges(this.getId());
+		}
+		return ranges;
+	}
 
 	/**
-	 * is this a virtual file or directory
+	 * Convert an internal offset to an image offset
+	 *
+	 * @param fileOffset the byte offset in this layout file to map
+	 *
+	 * @return the corresponding byte offset in the image where the file offset
+	 *         is located, or -1 if the file has no range layout information or
+	 *         if the fileOffset is larger than file size
+	 *
+	 * @throws TskCoreException exception thrown if critical error occurred
+	 *                          within tsk core and offset could not be
+	 *                          converted
+	 */
+	public long convertToImgOffset(long fileOffset) throws TskCoreException {
+		long imgOffset = -1;
+		for (TskFileRange byteRange : getRanges()) {
+
+			// if fileOffset is within the current byteRange, calculate the image
+			// offset and break
+			long rangeLength = byteRange.getByteLen();
+			if (fileOffset < rangeLength) {
+				imgOffset = byteRange.getByteStart() + fileOffset;
+				break;
+			}
+
+			// otherwise, decrement fileOffset by the length of the current
+			// byte range and continue
+			fileOffset -= rangeLength;
+		}
+		return imgOffset;
+	}
+
+	/**
+	 * Converts a file offset and length into a series of TskFileRange objects
+	 * whose offsets are relative to the image.  This method will only work on
+	 * files with layout ranges.
+	 *
+	 * @param fileOffset The byte offset in this file to map.
+	 * @param length     The length of bytes starting at fileOffset requested.
+	 *
+	 * @return The TskFileRange objects whose offsets are relative to the image.
+	 *         The sum total of lengths in these ranges will equal the length
+	 *         requested or will run until the end of this file.
+	 *
+	 * @throws TskCoreException
+	 */
+	public List<TskFileRange> convertToImgRanges(long fileOffset, long length) throws TskCoreException {
+		if (fileOffset < 0 || length < 0) {
+			throw new TskCoreException("fileOffset and length must be non-negative");
+		}
+
+		List<TskFileRange> thisRanges = getRanges();
+		List<TskFileRange> toRet = new ArrayList<>();
+
+		long requestedEnd = fileOffset + length;
+
+		// the number of bytes counted from the beginning of this file
+		long bytesCounted = 0;
+
+		for (int curRangeIdx = 0; curRangeIdx < thisRanges.size(); curRangeIdx++) {
+			// if we exceeded length of requested, then we are done
+			if (bytesCounted >= requestedEnd) {
+				break;
+			}
+
+			TskFileRange curRange = thisRanges.get(curRangeIdx);
+			long curRangeLen = curRange.getByteLen();
+			// the bytes counted when we reach the end of this range
+			long curRangeEnd = bytesCounted + curRangeLen;
+
+			// if fileOffset is less than current range's end and we have not 
+			// gone past the end we requested, then grab at least part of this 
+			// range.
+			if (fileOffset < curRangeEnd) {
+				// offset into range to be returned to user (0 if fileOffset <= bytesCounted)
+				long rangeOffset = Math.max(0, fileOffset - bytesCounted);
+
+				// calculate the new TskFileRange start by adding on the offset into the current range
+				long newRangeStart = curRange.getByteStart() + rangeOffset;
+
+				// how much this current range exceeds the length requested (or 0 if within the length requested)
+				long rangeOvershoot = Math.max(0, curRangeEnd - requestedEnd);
+				
+				long newRangeLen = curRangeLen - rangeOffset - rangeOvershoot;
+				toRet.add(new TskFileRange(newRangeStart, newRangeLen, toRet.size()));
+			}
+
+			bytesCounted = curRangeEnd;
+		}
+
+		return toRet;
+	}
+
+	/**
+	 * is this a virtual file or directory that was created by The Sleuth Kit or
+	 * Autopsy for general structure and organization.
 	 *
 	 * @return true if it's virtual, false otherwise
 	 */
@@ -448,22 +710,28 @@ public abstract class AbstractFile extends AbstractContent {
 	}
 
 	/**
-	 * Is this object a file
+	 * Is this object a file. Should return true for all types of files,
+	 * including file system, logical, derived, layout, and slack space for
+	 * files.
 	 *
 	 * @return true if a file, false otherwise
 	 */
 	public boolean isFile() {
-		return metaType.equals(TSK_FS_META_TYPE_ENUM.TSK_FS_META_TYPE_REG);
+		return metaType.equals(TSK_FS_META_TYPE_ENUM.TSK_FS_META_TYPE_REG)
+				|| (metaType.equals(TSK_FS_META_TYPE_ENUM.TSK_FS_META_TYPE_UNDEF)
+				&& dirType.equals(TSK_FS_NAME_TYPE_ENUM.REG));
 
 	}
 
 	/**
-	 * Is this object a directory
+	 * Is this object a directory. Should return true for file system folders
+	 * and virtual folders.
 	 *
 	 * @return true if directory, false otherwise
 	 */
 	public boolean isDir() {
-		return metaType.equals(TSK_FS_META_TYPE_ENUM.TSK_FS_META_TYPE_DIR);
+		return (metaType.equals(TSK_FS_META_TYPE_ENUM.TSK_FS_META_TYPE_DIR)
+				|| metaType.equals(TSK_FS_META_TYPE_ENUM.TSK_FS_META_TYPE_VIRT_DIR));
 	}
 
 	/**
@@ -475,21 +743,23 @@ public abstract class AbstractFile extends AbstractContent {
 
 	/**
 	 * @param uniquePath the unique path to an AbstractFile (or subclass)
-	 * usually obtained by a call to AbstractFile.getUniquePath.
+	 *                   usually obtained by a call to
+	 *                   AbstractFile.getUniquePath.
+	 *
 	 * @return the path to to an AbstractFile (or subclass) with the image and
-	 * volume path segments removed.
+	 *         volume path segments removed.
 	 */
 	public static String createNonUniquePath(String uniquePath) {
 
 		// split the path into parts
-		String[] pathSegments = uniquePath.split("/\\");
+		String[] pathSegments = uniquePath.split("/");
 
 		// see if uniquePath had an image and/or volume name
 		int index = 0;
-		if (pathSegments[0].startsWith("img_")) {
+		if (pathSegments[0].startsWith("img_")) { //NON-NLS
 			++index;
 		}
-		if (pathSegments[1].startsWith("vol_")) {
+		if (pathSegments[1].startsWith("vol_")) { //NON-NLS
 			++index;
 		}
 
@@ -497,7 +767,9 @@ public abstract class AbstractFile extends AbstractContent {
 		// name, if they exist).
 		StringBuilder strbuf = new StringBuilder();
 		for (; index < pathSegments.length; ++index) {
-			strbuf.append("/").append(pathSegments[index]);
+			if (!pathSegments[index].isEmpty()) {
+				strbuf.append("/").append(pathSegments[index]);
+			}
 		}
 
 		return strbuf.toString();
@@ -505,7 +777,9 @@ public abstract class AbstractFile extends AbstractContent {
 
 	/**
 	 * @return a list of AbstractFiles that are the children of this Directory.
-	 * Only returns children of type TskData.TSK_DB_FILES_TYPE_ENUM.FS.
+	 *         Only returns children of type TskData.TSK_DB_FILES_TYPE_ENUM.FS.
+	 *
+	 * @throws org.sleuthkit.datamodel.TskCoreException
 	 */
 	public List<AbstractFile> listFiles() throws TskCoreException {
 		// first, get all children
@@ -550,6 +824,7 @@ public abstract class AbstractFile extends AbstractContent {
 
 	/**
 	 * @param flag the TSK_FS_NAME_FLAG_ENUM to check
+	 *
 	 * @return true if the given flag is set in this FsContent object.
 	 */
 	public boolean isDirNameFlagSet(TSK_FS_NAME_FLAG_ENUM flag) {
@@ -558,7 +833,7 @@ public abstract class AbstractFile extends AbstractContent {
 
 	/**
 	 * @return a string representation of the directory name flag (type
-	 * TSK_FS_NAME_FLAG_ENUM)
+	 *         TSK_FS_NAME_FLAG_ENUM)
 	 */
 	public String getDirFlagAsString() {
 		return dirFlag.toString();
@@ -571,7 +846,7 @@ public abstract class AbstractFile extends AbstractContent {
 		String str = "";
 		if (metaFlags.contains(TSK_FS_META_FLAG_ENUM.ALLOC)) {
 			str = TSK_FS_META_FLAG_ENUM.ALLOC.toString();
-		} else if (metaFlags.contains(TSK_FS_META_FLAG_ENUM.ALLOC)) {
+		} else if (metaFlags.contains(TSK_FS_META_FLAG_ENUM.UNALLOC)) {
 			str = TSK_FS_META_FLAG_ENUM.UNALLOC.toString();
 		}
 		return str;
@@ -579,30 +854,519 @@ public abstract class AbstractFile extends AbstractContent {
 
 	/**
 	 * @param metaFlag the TSK_FS_META_FLAG_ENUM to check
+	 *
 	 * @return true if the given meta flag is set in this FsContent object.
 	 */
 	public boolean isMetaFlagSet(TSK_FS_META_FLAG_ENUM metaFlag) {
 		return metaFlags.contains(metaFlag);
 	}
 
-		
+	@Override
+	public final int read(byte[] buf, long offset, long len) throws TskCoreException {
+		//template method
+		//if localPath is set, use local, otherwise, use readCustom() supplied by derived class
+		if (localPathSet) {
+			return readLocal(buf, offset, len);
+		} else {
+			return readInt(buf, offset, len);
+		}
+
+	}
+
+	/**
+	 * Internal custom read (non-local) method that child classes can implement
+	 *
+	 * @param buf    buffer to read into
+	 * @param offset start reading position in the file
+	 * @param len    number of bytes to read
+	 *
+	 * @return number of bytes read
+	 *
+	 * @throws TskCoreException exception thrown when file could not be read
+	 */
+	protected int readInt(byte[] buf, long offset, long len) throws TskCoreException {
+		return 0;
+	}
+
+	/**
+	 * Local file path read support
+	 *
+	 * @param buf    buffer to read into
+	 * @param offset start reading position in the file
+	 * @param len    number of bytes to read
+	 *
+	 * @return number of bytes read
+	 *
+	 * @throws TskCoreException exception thrown when file could not be read
+	 */
+	protected final int readLocal(byte[] buf, long offset, long len) throws TskCoreException {
+		if (!localPathSet) {
+			throw new TskCoreException(
+					BUNDLE.getString("AbstractFile.readLocal.exception.msg1.text"));
+		}
+
+		if (isDir()) {
+			return 0;
+		}
+
+		// If the file is empty, just return that zero bytes were read.
+		if (getSize() == 0) {
+			return 0;
+		}
+
+		loadLocalFile();
+		if (!localFile.exists()) {
+			throw new TskCoreException(
+					MessageFormat.format(BUNDLE.getString("AbstractFile.readLocal.exception.msg2.text"), localAbsPath));
+		}
+		if (!localFile.canRead()) {
+			throw new TskCoreException(
+					MessageFormat.format(BUNDLE.getString("AbstractFile.readLocal.exception.msg3.text"), localAbsPath));
+		}
+
+		int bytesRead = 0;
+
+		if (localFileHandle == null) {
+			synchronized (this) {
+				if (localFileHandle == null) {
+					try {
+						localFileHandle = new RandomAccessFile(localFile, "r");
+					} catch (FileNotFoundException ex) {
+						final String msg = MessageFormat.format(BUNDLE.getString(
+								"AbstractFile.readLocal.exception.msg4.text"),
+								localAbsPath);
+						LOGGER.log(Level.SEVERE, msg, ex);
+						//file could have been deleted or moved
+						throw new TskCoreException(msg, ex);
+					}
+				}
+			}
+		}
+
+		try {
+			if (!encodingType.equals(TskData.EncodingType.NONE)) {
+				// The file is encoded, so we need to alter the offset to read (since there's
+				// a header on the encoded file) and then decode each byte
+				long encodedOffset = offset + EncodedFileUtil.getHeaderLength();
+
+				//move to the user request offset in the stream
+				long curOffset = localFileHandle.getFilePointer();
+				if (curOffset != encodedOffset) {
+					localFileHandle.seek(encodedOffset);
+				}
+				bytesRead = localFileHandle.read(buf, 0, (int) len);
+				for (int i = 0; i < bytesRead; i++) {
+					buf[i] = EncodedFileUtil.decodeByte(buf[i], encodingType);
+				}
+				return bytesRead;
+			} else {
+				//move to the user request offset in the stream
+				long curOffset = localFileHandle.getFilePointer();
+				if (curOffset != offset) {
+					localFileHandle.seek(offset);
+				}
+				//note, we are always writing at 0 offset of user buffer
+				return localFileHandle.read(buf, 0, (int) len);
+			}
+		} catch (IOException ex) {
+			final String msg = MessageFormat.format(BUNDLE.getString("AbstractFile.readLocal.exception.msg5.text"), localAbsPath);
+			LOGGER.log(Level.SEVERE, msg, ex);
+			//local file could have been deleted / moved
+			throw new TskCoreException(msg, ex);
+		}
+	}
+
+	/**
+	 * Set local path for the file, as stored in db tsk_files_path, relative to
+	 * the case db path or an absolute path. When set, subsequent invocations of
+	 * read() will read the file in the local path.
+	 *
+	 * @param localPath local path to be set
+	 */
+	void setLocalFilePath(String localPath) {
+
+		if (localPath == null || localPath.equals("")) {
+			this.localPath = "";
+			localAbsPath = null;
+			localPathSet = false;
+		} else {
+			// It should always be the case that absolute paths start with slashes or a windows drive letter
+			// and relative paths do not, but some older versions of modules created derived file paths
+			// starting with slashes. So we first check if this file is a DerivedFile before looking at the path.
+			this.localPath = localPath;
+			if (this instanceof DerivedFile) {
+				// DerivedFiles always have relative paths
+				this.localAbsPath = getSleuthkitCase().getDbDirPath() + java.io.File.separator + localPath;
+			} else {
+				// If a path starts with a slash or with a Windows drive letter, then it is
+				// absolute. Otherwise it is relative.
+				if (localPath.startsWith("/") || localPath.startsWith("\\")
+						|| localPath.matches("[A-Za-z]:[/\\\\].*")) {
+					this.localAbsPath = localPath;
+				} else {
+					this.localAbsPath = getSleuthkitCase().getDbDirPath() + java.io.File.separator + localPath;
+				}
+			}
+			this.localPathSet = true;
+		}
+	}
+
+	/**
+	 * Get local relative to case db path of the file
+	 *
+	 * @return local file path if set
+	 */
+	public String getLocalPath() {
+		return localPath;
+	}
+
+	/**
+	 * Get local absolute path of the file, if localPath has been set
+	 *
+	 * @return local absolute file path if local path has been set, or null
+	 */
+	public String getLocalAbsPath() {
+		return localAbsPath;
+	}
+
+	/**
+	 * Set the type of encoding used on the file (for local/derived files only)
+	 *
+	 * @param encodingType
+	 */
+	final void setEncodingType(TskData.EncodingType encodingType) {
+		this.encodingType = encodingType;
+	}
+
+	/**
+	 * Check if the file exists. If non-local always true, if local, checks if
+	 * actual local path exists
+	 *
+	 * @return true if the file exists, false otherwise
+	 */
+	public boolean exists() {
+		if (!localPathSet) {
+			return true;
+		} else {
+			try {
+				loadLocalFile();
+				return localFile.exists();
+			} catch (TskCoreException ex) {
+				LOGGER.log(Level.SEVERE, ex.getMessage());
+				return false;
+			}
+		}
+	}
+
+	/**
+	 * Check if the file exists and is readable. If non-local (e.g. within an
+	 * image), always true, if local, checks if actual local path exists and is
+	 * readable
+	 *
+	 * @return true if the file is readable
+	 */
+	public boolean canRead() {
+		if (!localPathSet) {
+			return true;
+		} else {
+			try {
+				loadLocalFile();
+				return localFile.canRead();
+			} catch (TskCoreException ex) {
+				LOGGER.log(Level.SEVERE, ex.getMessage());
+				return false;
+			}
+		}
+	}
+
+	/**
+	 * Lazy load local file handle
+	 *
+	 * @throws org.sleuthkit.datamodel.TskCoreException If the local path is not
+	 *                                                  set.
+	 */
+	private void loadLocalFile() throws TskCoreException {
+		if (!localPathSet) {
+			throw new TskCoreException(
+					BUNDLE.getString("AbstractFile.readLocal.exception.msg1.text"));
+		}
+
+		// already been set
+		if (localFile != null) {
+			return;
+		}
+
+		synchronized (this) {
+			if (localFile == null) {
+				localFile = new java.io.File(localAbsPath);
+			}
+		}
+	}
+
+	@Override
+	public void close() {
+
+		//close local file handle if set
+		if (localFileHandle != null) {
+			synchronized (this) {
+				if (localFileHandle != null) {
+					try {
+						localFileHandle.close();
+					} catch (IOException ex) {
+						LOGGER.log(Level.SEVERE, "Could not close file handle for file: " + getParentPath() + getName(), ex); //NON-NLS
+					}
+					localFileHandle = null;
+				}
+			}
+		}
+
+	}
+
+	@Override
+	protected void finalize() throws Throwable {
+		try {
+			close();
+		} finally {
+			super.finalize();
+		}
+	}
+
 	@Override
 	public String toString(boolean preserveState) {
-		return super.toString(preserveState) + "AbstractFile [\t" 
-				+ "\t" + "fileType " + fileType
-				+ "\tctime " + ctime 
-				+ "\tcrtime " + crtime 
-				+ "\t" + "mtime " + mtime + "\t" + "atime " + atime 
-				+ "\t" + "attrId " + attrId 
-				+ "\t" + "attrType " + attrType
-				+ "\t" + "dirFlag " + dirFlag + "\t" + "dirType " + dirType 
-				+ "\t" + "uid " + uid
-				+ "\t" + "gid " + gid 
-				+ "\t" + "metaAddr " + metaAddr + "\t" + "metaFlags " + metaFlags 
-				+ "\t" + "metaType " + metaType + "\t" + "modes " + modes 
-				+ "\t" + "parentPath " + parentPath + "\t" + "size " + size 
-				+ "\t" + "knownState " + knownState + "\t" + "md5Hash " + md5Hash 
+		return super.toString(preserveState) + "AbstractFile [\t" //NON-NLS
+				+ "\t" + "fileType " + fileType //NON-NLS
+				+ "\tctime " + ctime //NON-NLS
+				+ "\tcrtime " + crtime //NON-NLS
+				+ "\t" + "mtime " + mtime + "\t" + "atime " + atime //NON-NLS
+				+ "\t" + "attrId " + attrId //NON-NLS
+				+ "\t" + "attrType " + attrType //NON-NLS
+				+ "\t" + "dirFlag " + dirFlag + "\t" + "dirType " + dirType //NON-NLS
+				+ "\t" + "uid " + uid //NON-NLS
+				+ "\t" + "gid " + gid //NON-NLS
+				+ "\t" + "metaAddr " + metaAddr + "\t" + "metaSeq " + metaSeq + "\t" + "metaFlags " + metaFlags //NON-NLS
+				+ "\t" + "metaType " + metaType + "\t" + "modes " + modes //NON-NLS
+				+ "\t" + "parentPath " + parentPath + "\t" + "size " + size //NON-NLS
+				+ "\t" + "knownState " + knownState + "\t" + "md5Hash " + md5Hash + "\t" + "sha256Hash " + sha256Hash //NON-NLS
+				+ "\t" + "localPathSet " + localPathSet + "\t" + "localPath " + localPath //NON-NLS
+				+ "\t" + "localAbsPath " + localAbsPath + "\t" + "localFile " + localFile //NON-NLS
 				+ "]\t";
+	}
+
+	/**
+	 * Possible return values for comparing a file to a list of mime types
+	 */
+	public enum MimeMatchEnum {
+
+		UNDEFINED, /// file does not have a defined mime time in blackboard
+		TRUE, /// file has a defined mime type and it is one of the given ones
+		FALSE /// file has a defined mime type and it is not one of the given ones.
+	}
+
+	/**
+	 * Determines if this file's type is one of the ones passed in. Uses the
+	 * blackboard attribute for file type.
+	 *
+	 * @param mimeTypes Set of file types to compare against
+	 *
+	 * @return
+	 */
+	public MimeMatchEnum isMimeType(SortedSet<String> mimeTypes) {
+		if (this.mimeType == null) {
+			return MimeMatchEnum.UNDEFINED;
+		}
+		if (mimeTypes.contains(this.mimeType)) {
+			return MimeMatchEnum.TRUE;
+		}
+		return MimeMatchEnum.FALSE;
+	}
+
+	/**
+	 * Saves the editable file properties of this file to the case database,
+	 * e.g., the MIME type, MD5 hash, and known state.
+	 *
+	 * @throws TskCoreException if there is an error saving the editable file
+	 *                          properties to the case database.
+	 */
+	public void save() throws TskCoreException {
+
+		// No fields have been updated
+		if (!(md5HashDirty || sha256HashDirty || mimeTypeDirty || knownStateDirty)) {
+			return;
+		}
+
+		String queryStr = "";
+		if (mimeTypeDirty) {
+			queryStr = "mime_type = '" + this.getMIMEType() + "'";
+		}
+		if (md5HashDirty) {
+			if (!queryStr.isEmpty()) {
+				queryStr += ", ";
+			}
+			queryStr += "md5 = '" + this.getMd5Hash() + "'";
+		}
+		if (sha256HashDirty) {
+			if (!queryStr.isEmpty()) {
+				queryStr += ", ";
+			}
+			queryStr += "sha256 = '" + this.getSha256Hash() + "'";
+		}
+		if (knownStateDirty) {
+			if (!queryStr.isEmpty()) {
+				queryStr += ", ";
+			}
+			queryStr += "known = '" + this.getKnown().getFileKnownValue() + "'";
+		}
+
+		queryStr = "UPDATE tsk_files SET " + queryStr + " WHERE obj_id = " + this.getId();
+
+		getSleuthkitCase().acquireSingleUserCaseWriteLock();
+		try (SleuthkitCase.CaseDbConnection connection = getSleuthkitCase().getConnection();
+				Statement statement = connection.createStatement();) {
+
+			connection.executeUpdate(statement, queryStr);
+			md5HashDirty = false;
+			sha256HashDirty = false;
+			mimeTypeDirty = false;
+			knownStateDirty = false;
+		} catch (SQLException ex) {
+			throw new TskCoreException(String.format("Error saving properties for file (obj_id = %s)", this.getId()), ex);
+		} finally {
+			getSleuthkitCase().releaseSingleUserCaseWriteLock();
+		}
+	}
+
+	@Override
+	public BlackboardArtifact newArtifact(int artifactTypeID) throws TskCoreException {
+		// don't let them make more than 1 GEN_INFO
+		if (artifactTypeID == BlackboardArtifact.ARTIFACT_TYPE.TSK_GEN_INFO.getTypeID()) {
+			return getGenInfoArtifact(true);
+		}
+		return getSleuthkitCase().newBlackboardArtifact(artifactTypeID, getId(), dataSourceObjectId);
+	}
+
+	/**
+	 * Initializes common fields used by AbstactFile implementations (objects in
+	 * tsk_files table)
+	 *
+	 * @param db         case / db handle where this file belongs to
+	 * @param objId      object id in tsk_objects table
+	 * @param attrType
+	 * @param attrId
+	 * @param name       name field of the file
+	 * @param fileType   type of the file
+	 * @param metaAddr
+	 * @param metaSeq
+	 * @param dirType
+	 * @param metaType
+	 * @param dirFlag
+	 * @param metaFlags
+	 * @param size
+	 * @param ctime
+	 * @param crtime
+	 * @param atime
+	 * @param mtime
+	 * @param modes
+	 * @param uid
+	 * @param gid
+	 * @param md5Hash    md5sum of the file, or null or "NULL" if not present
+	 * @param knownState knownState status of the file, or null if unknown
+	 *                   (default)
+	 * @param parentPath
+	 *
+	 * @deprecated Do not make subclasses outside of this package.
+	 */
+	@Deprecated
+	@SuppressWarnings("deprecation")
+	protected AbstractFile(SleuthkitCase db, long objId, TskData.TSK_FS_ATTR_TYPE_ENUM attrType, short attrId,
+			String name, TskData.TSK_DB_FILES_TYPE_ENUM fileType, long metaAddr, int metaSeq,
+			TSK_FS_NAME_TYPE_ENUM dirType, TSK_FS_META_TYPE_ENUM metaType, TSK_FS_NAME_FLAG_ENUM dirFlag, short metaFlags,
+			long size, long ctime, long crtime, long atime, long mtime, short modes, int uid, int gid, String md5Hash, FileKnown knownState,
+			String parentPath) {
+		this(db, objId, db.getDataSourceObjectId(objId), attrType, (int) attrId, name, fileType, metaAddr, metaSeq, dirType, metaType, dirFlag, metaFlags, size, ctime, crtime, atime, mtime, modes, uid, gid, md5Hash, null, knownState, parentPath, null, null);
+	}
+
+	/**
+	 * Initializes common fields used by AbstactFile implementations (objects in
+	 * tsk_files table). This deprecated version has attrId filed defined as a
+	 * short which has since been changed to an int.
+	 *
+	 * @param db                 case / db handle where this file belongs to
+	 * @param objId              object id in tsk_objects table
+	 * @param dataSourceObjectId The object id of the root data source of this
+	 *                           file.
+	 * @param attrType
+	 * @param attrId
+	 * @param name               name field of the file
+	 * @param fileType           type of the file
+	 * @param metaAddr
+	 * @param metaSeq
+	 * @param dirType
+	 * @param metaType
+	 * @param dirFlag
+	 * @param metaFlags
+	 * @param size
+	 * @param ctime
+	 * @param crtime
+	 * @param atime
+	 * @param mtime
+	 * @param modes
+	 * @param uid
+	 * @param gid
+	 * @param md5Hash            md5sum of the file, or null or "NULL" if not
+	 *                           present
+	 * @param knownState         knownState status of the file, or null if
+	 *                           unknown (default)
+	 * @param parentPath
+	 * @param mimeType           The MIME type of the file, can be null
+	 *
+	 * @deprecated Do not make subclasses outside of this package.
+	 */
+	@Deprecated
+	@SuppressWarnings("deprecation")
+	AbstractFile(SleuthkitCase db, long objId, long dataSourceObjectId, TskData.TSK_FS_ATTR_TYPE_ENUM attrType, short attrId,
+			String name, TskData.TSK_DB_FILES_TYPE_ENUM fileType, long metaAddr, int metaSeq, TSK_FS_NAME_TYPE_ENUM dirType, TSK_FS_META_TYPE_ENUM metaType,
+			TSK_FS_NAME_FLAG_ENUM dirFlag, short metaFlags, long size, long ctime, long crtime, long atime, long mtime, short modes,
+			int uid, int gid, String md5Hash, FileKnown knownState, String parentPath, String mimeType) {
+		this(db, objId, dataSourceObjectId, attrType, (int) attrId, name, fileType, metaAddr, metaSeq, dirType, metaType, dirFlag, metaFlags, size, ctime, crtime, atime, mtime, modes, uid, gid, md5Hash, null, knownState, parentPath, null, null);
+	}
+
+	/**
+	 * Get the attribute id
+	 *
+	 * @return attribute id
+	 *
+	 * @deprecated Use getAttributeId() method instead as it returns integer
+	 * instead of short.
+	 */
+	@Deprecated
+	@SuppressWarnings("deprecation")
+	public short getAttrId() {
+		/*
+		 * NOTE: previously attrId used to be stored in AbstractFile as (signed)
+		 * short even though it is stored as uint16 in TSK. In extremely rare
+		 * occurrences attrId can be larger than what a signed short can hold
+		 * (2^15). Changes were made to AbstractFile to store attrId as integer.
+		 * Therefore this method has been deprecated. For backwards
+		 * compatibility, attribute ids that are larger than 32K are converted
+		 * to a negative number.
+		 */
+		return (short) attrId;	// casting to signed short converts values over 32K to negative values
+	}
+
+	/**
+	 * Set local path for the file, as stored in db tsk_files_path, relative to
+	 * the case db path or an absolute path. When set, subsequent invocations of
+	 * read() will read the file in the local path.
+	 *
+	 * @param localPath  local path to be set
+	 * @param isAbsolute true if the path is absolute, false if relative to the
+	 *                   case db
+	 *
+	 * @deprecated Do not make subclasses outside of this package.
+	 */
+	@Deprecated
+	protected void setLocalPath(String localPath, boolean isAbsolute) {
+		setLocalFilePath(localPath);
 	}
 
 	/*
@@ -614,31 +1378,41 @@ public abstract class AbstractFile extends AbstractContent {
 	 * Return the epoch into string in ISO 8601 dateTime format
 	 *
 	 * @param epoch time in seconds
+	 *
 	 * @return formatted date time string as "yyyy-MM-dd HH:mm:ss"
+	 *
+	 * @deprecated
 	 */
+	@Deprecated
 	public static String epochToTime(long epoch) {
-		String time = "0000-00-00 00:00:00";
-		if (epoch != 0) {
-			time = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(new java.util.Date(epoch * 1000));
-		}
-		return time;
+		return TimeUtilities.epochToTime(epoch);
+	}
+
+	/**
+	 * Return the epoch into string in ISO 8601 dateTime format, in the given
+	 * timezone
+	 *
+	 * @param epoch time in seconds
+	 * @param tzone time zone
+	 *
+	 * @return formatted date time string as "yyyy-MM-dd HH:mm:ss"
+	 *
+	 * @deprecated
+	 */
+	@Deprecated
+	public static String epochToTime(long epoch, TimeZone tzone) {
+		return TimeUtilities.epochToTime(epoch, tzone);
 	}
 
 	/**
 	 * Convert from ISO 8601 formatted date time string to epoch time in seconds
 	 *
 	 * @param time formatted date time string as "yyyy-MM-dd HH:mm:ss"
+	 *
 	 * @return epoch time in seconds
 	 */
+	@Deprecated
 	public static long timeToEpoch(String time) {
-		long epoch = 0;
-		try {
-			epoch = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss").parse(time).getTime() / 1000;
-		} catch (Exception e) {
-		}
-
-		return epoch;
+		return TimeUtilities.timeToEpoch(time);
 	}
-	
-	
 }

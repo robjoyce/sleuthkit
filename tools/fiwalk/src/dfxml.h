@@ -10,7 +10,7 @@
   #define __STDC_FORMAT_MACROS
 #endif
 
-#ifdef HAVE_PTHREAD_H
+#ifdef HAVE_PTHREAD
   #include <pthread.h>
 #endif
 #include <stdio.h>
@@ -70,7 +70,7 @@
   #endif
 #endif
 
-#include "tsk3/libtsk.h"
+#include "tsk/libtsk.h"
 
 #ifdef __cplusplus
 class xml {
@@ -178,7 +178,7 @@ public:
     void xmlout( const std::string &tag,const std::string &value){ xmlout(tag,value,"",true); }
     void xmlout( const std::string &tag,const int value){ xmlprintf(tag,"","%d",value); }
     void xmloutl(const std::string &tag,const long value){ xmlprintf(tag,"","%ld",value); }
-    void xmlout( const std::string &tag,const int64_t value){ xmlprintf(tag,"","%"PRId64,value); }
+    void xmlout( const std::string &tag,const int64_t value){ xmlprintf(tag,"","%" PRId64,value); }
     void xmlout( const std::string &tag,const double value){ xmlprintf(tag,"","%f",value); }
     void xmlout( const std::string &tag,const struct timeval &ts) {
 	xmlprintf(tag,"","%d.%06d",(int)ts.tv_sec, (int)ts.tv_usec);

@@ -1,15 +1,15 @@
 /*
- * Sleuth Kit Data Model
- * 
- * Copyright 2013 Basis Technology Corp.
+ * SleuthKit Java Bindings
+ *
+ * Copyright 2011-2017 Basis Technology Corp.
  * Contact: carrier <at> sleuthkit <dot> org
- * 
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *     http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -18,278 +18,113 @@
  */
 package org.sleuthkit.datamodel;
 
-import java.io.FileNotFoundException;
-import java.io.IOException;
-import java.io.RandomAccessFile;
-import java.util.Collections;
-import java.util.List;
+import java.text.MessageFormat;
+import java.util.ResourceBundle;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import org.sleuthkit.datamodel.TskData.FileKnown;
 import org.sleuthkit.datamodel.TskData.TSK_DB_FILES_TYPE_ENUM;
-import org.sleuthkit.datamodel.TskData.TSK_FS_ATTR_TYPE_ENUM;
 import org.sleuthkit.datamodel.TskData.TSK_FS_META_TYPE_ENUM;
 import org.sleuthkit.datamodel.TskData.TSK_FS_NAME_FLAG_ENUM;
 import org.sleuthkit.datamodel.TskData.TSK_FS_NAME_TYPE_ENUM;
 
 /**
- * Represents a file or directory that has been derived from another file.
- *
- * The file extends AbstractFile by adding derived method used and information
- * needed to rederive it.
- *
- * Use case example is an extracted file from an archive.
+ * A representation of a file or directory that has been derived from another
+ * file and is stored outside of the data source (e.g., on a user's machine). A
+ * typical example of a derived file is a file extracted from an archive file.
  */
 public class DerivedFile extends AbstractFile {
 
-	private String localPath; ///< local path as stored in db tsk_files_path, is relative to the db
-	private String localAbsPath; ///< absolute path representation of the local path
 	private volatile DerivedMethod derivedMethod;
-	private volatile RandomAccessFile fileHandle;
-	private volatile java.io.File localFile;
 	private static final Logger logger = Logger.getLogger(DerivedFile.class.getName());
-	private boolean hasDerivedMethod = true; ///< whether it has the derived method to lazy load or not
+	private static ResourceBundle bundle = ResourceBundle.getBundle("org.sleuthkit.datamodel.Bundle");
+	private boolean hasDerivedMethod = true;
 
 	/**
-	 * Create a db representation of a derived file
+	 * Constructs a representation of a file or directory that has been derived
+	 * from another file and is stored outside of the data source (e.g., on a
+	 * user's machine). A typical example of a derived file is a file extracted
+	 * from an archive file.
 	 *
-	 * @param db
-	 * @param objId object if of this file already in database
-	 * @param name name of this derived file
-	 * @param dirType
-	 * @param metaType
-	 * @param dirFlag
-	 * @param metaFlags
-	 * @param size size of the file
-	 * @param ctime
-	 * @param crtime
-	 * @param atime
-	 * @param mtime
-	 * @param md5Hash
-	 * @param knownState
-	 * @param parentPath path of the parent of this derived file (e.g. fs zip
-	 * file, or another derived file path)
-	 * @param localPath local path of this derived file, relative to the db path
+	 * @param db                 The case database to which the file has been
+	 *                           added.
+	 * @param objId              The object id of the file in the case database.
+	 * @param dataSourceObjectId The object id of the data source for the file.
+	 * @param name               The name of the file.
+	 * @param dirType            The type of the file, usually as reported in
+	 *                           the name structure of the file system. May be
+	 *                           set to TSK_FS_NAME_TYPE_ENUM.UNDEF.
+	 * @param metaType           The type of the file, usually as reported in
+	 *                           the metadata structure of the file system. May
+	 *                           be set to
+	 *                           TSK_FS_META_TYPE_ENUM.TSK_FS_META_TYPE_UNDEF.
+	 * @param dirFlag            The allocated status of the file, usually as
+	 *                           reported in the name structure of the file
+	 *                           system.
+	 * @param metaFlags          The allocated status of the file, usually as
+	 *                           reported in the metadata structure of the file
+	 *                           system.
+	 * @param size               The size of the file.
+	 * @param ctime              The changed time of the file.
+	 * @param crtime             The created time of the file.
+	 * @param atime              The accessed time of the file.
+	 * @param mtime              The modified time of the file.
+	 * @param md5Hash            The MD5 hash of the file, null if not yet
+	 *                           calculated.
+	 * @param knownState         The known state of the file from a hash
+	 *                           database lookup, null if not yet looked up.
+	 * @param parentPath         The path of the parent of the file.
+	 * @param localPath          The absolute path of the file in secondary
+	 *                           storage.
+	 * @param parentId           The object id of parent of the file.
+	 * @param mimeType           The MIME type of the file, null if it has not
+	 *                           yet been determined.
+	 * @param encodingType		     The encoding type of the file.
+	 * @param extension          The extension part of the file name (not
+	 *                           including the '.'), can be null.
 	 */
-	protected DerivedFile(SleuthkitCase db, long objId, String name,
-			TSK_FS_NAME_TYPE_ENUM dirType, TSK_FS_META_TYPE_ENUM metaType, TSK_FS_NAME_FLAG_ENUM dirFlag,
-			short metaFlags, long size,
+	DerivedFile(SleuthkitCase db,
+			long objId,
+			long dataSourceObjectId,
+			String name,
+			TSK_FS_NAME_TYPE_ENUM dirType, TSK_FS_META_TYPE_ENUM metaType,
+			TSK_FS_NAME_FLAG_ENUM dirFlag, short metaFlags,
+			long size,
 			long ctime, long crtime, long atime, long mtime,
-			String md5Hash,
-			FileKnown knownState, String parentPath, String localPath) {
-		super(db, objId, TSK_FS_ATTR_TYPE_ENUM.TSK_FS_ATTR_TYPE_DEFAULT, (short) 0,
-				name, TSK_DB_FILES_TYPE_ENUM.DERIVED, 0L, dirType, metaType, dirFlag,
-				metaFlags, size, ctime, crtime, atime, mtime, (short) 0, 0, 0, md5Hash, knownState, parentPath);
-
-		this.localPath = localPath;
-
-		if (this.localPath == null) {
-			this.localPath = "";
-		} else {
-			localAbsPath = db.getDbDirPath() + java.io.File.separator + this.localPath;
-		}
+			String md5Hash, String sha256Hash, FileKnown knownState,
+			String parentPath,
+			String localPath,
+			long parentId,
+			String mimeType,
+			TskData.EncodingType encodingType,
+			String extension) {
+		// TODO (AUT-1904): The parent id should be passed to AbstractContent 
+		// through the class hierarchy contructors.
+		super(db, objId, dataSourceObjectId, TskData.TSK_FS_ATTR_TYPE_ENUM.TSK_FS_ATTR_TYPE_DEFAULT, 0,
+				name, TSK_DB_FILES_TYPE_ENUM.LOCAL, 0L, 0, dirType, metaType, dirFlag,
+				metaFlags, size, ctime, crtime, atime, mtime, (short) 0, 0, 0, md5Hash, sha256Hash, knownState, parentPath, mimeType, extension);
+		setLocalFilePath(localPath);
+		setEncodingType(encodingType);
 	}
 
 	/**
-	 * Create a db representation of a derived file
+	 * Indicates whether or not this derived file is the root of a file system,
+	 * always returns false.
 	 *
-	 * @param db
-	 * @param objId object if of this file already in database
-	 * @param name name of this derived file
-	 * @param dirType
-	 * @param metaType
-	 * @param dirFlag
-	 * @param metaFlags
-	 * @param size size of the file
-	 * @param ctime
-	 * @param crtime
-	 * @param atime
-	 * @param mtime
-	 * @param md5Hash
-	 * @param knownState
-	 * @param parentPath path of the parent of this derived file (e.g. fs zip
-	 * file, or another derived file path)
-	 * @param localPath local path of this derived file, relative to the db path
-	 * @param parentId parent id of this derived file to set if available
+	 * @return False.
 	 */
-	protected DerivedFile(SleuthkitCase db, long objId, String name, TSK_FS_NAME_TYPE_ENUM dirType, TSK_FS_META_TYPE_ENUM metaType, TSK_FS_NAME_FLAG_ENUM dirFlag, short metaFlags, long size,
-			long ctime, long crtime, long atime, long mtime,
-			String md5Hash, FileKnown knownState, String parentPath, String localPath, long parentId) {
-		this(db, objId, name, dirType, metaType, dirFlag, metaFlags, size, ctime, crtime, atime, mtime, md5Hash, knownState, parentPath, localPath);
-
-		if (parentId > 0) {
-			setParentId(parentId);
-		}
-
-	}
-
-	/**
-	 * Get local path of the file relative to database dir
-	 *
-	 * @return local relative file path
-	 */
-	public String getLocalPath() {
-		return localPath;
-	}
-
-	/**
-	 * Get local absolute path of the file
-	 *
-	 * @return local absolute file path
-	 */
-	public String getLocalAbsPath() {
-		return localAbsPath;
-	}
-
-	@Override
-	public Image getImage() throws TskCoreException {
-		//TODO need schema support to implement this more efficiently
-		Image image = null;
-		Content ancestor = getParent();
-		image = ancestor.getImage();
-		while (image == null) {
-			ancestor = ancestor.getParent();
-			if (ancestor == null) {
-				//should never happen
-				break;
-			}
-			image = ancestor.getImage();
-		}
-		return image;
-	}
-
-	@Override
-	public List<TskFileRange> getRanges() throws TskCoreException {
-		return Collections.<TskFileRange>emptyList();
-	}
-
 	@Override
 	public boolean isRoot() {
-		//not a root of a fs, since it always has a parent
 		return false;
 	}
 
-	@Override
-	public <T> T accept(ContentVisitor<T> v) {
-		return v.visit(this);
-	}
-
-	@Override
-	public List<Content> getChildren() throws TskCoreException {
-		//TODO navigate local file system, OR via tsk database
-		//even if local file (not dir), still check for children,
-		//as it can have other derived files
-
-		//derived file/dir children, can only be other derived files
-		return getSleuthkitCase().getAbstractFileChildren(this, TSK_DB_FILES_TYPE_ENUM.DERIVED);
-
-	}
-
-	@Override
-	public List<Long> getChildrenIds() throws TskCoreException {
-		return getSleuthkitCase().getAbstractFileChildrenIds(this, TSK_DB_FILES_TYPE_ENUM.DERIVED);
-	}
-
-	@Override
-	public <T> T accept(SleuthkitItemVisitor<T> v) {
-		return v.visit(this);
-	}
-
-	public boolean exists() {
-		getLocalFile();
-		return localFile.exists();
-	}
-
-	public boolean canRead() {
-		getLocalFile();
-		return localFile.canRead();
-	}
-
 	/**
-	 * lazy load local file
+	 * Gets the method used to derive this file, if it has been recorded.
 	 *
-	 * @return
-	 */
-	private java.io.File getLocalFile() {
-		if (localFile == null) {
-			synchronized (this) {
-				localFile = new java.io.File(localAbsPath);
-			}
-		}
-		return localFile;
-	}
-
-	@Override
-	public void close() {
-		if (fileHandle != null) {
-			synchronized (this) {
-				if (fileHandle != null) {
-					try {
-						fileHandle.close();
-					} catch (IOException ex) {
-						logger.log(Level.SEVERE, "Could not close file handle for file: " + this.toString(), ex);
-					}
-					fileHandle = null;
-				}
-			}
-		}
-	}
-
-	@Override
-	public int read(byte[] buf, long offset, long len) throws TskCoreException {
-		if (isDir()) {
-			return 0;
-		}
-
-		getLocalFile();
-		if (!localFile.exists()) {
-			throw new TskCoreException("Error reading derived file, it does not exist at local path: " + localAbsPath);
-		}
-		if (!localFile.canRead()) {
-			throw new TskCoreException("Error reading derived file, file not readable at local path: " + localAbsPath);
-		}
-
-		int bytesRead = 0;
-
-		if (fileHandle == null) {
-			synchronized (this) {
-				if (fileHandle == null) {
-					try {
-						fileHandle = new RandomAccessFile(localFile, "r");
-					} catch (FileNotFoundException ex) {
-						final String msg = "Error reading derived file: " + this.toString();
-						logger.log(Level.SEVERE, msg, ex);
-						//TODO decide if to swallow exception in this case, file could have been deleted or moved
-						throw new TskCoreException(msg, ex);
-					}
-				}
-			}
-		}
-
-		try {
-			//move to the user request offset in the stream
-			long curOffset = fileHandle.getFilePointer();
-			if (curOffset != offset) {
-				fileHandle.seek(offset);
-			}
-			//note, we are always writing at 0 offset of user buffer
-			bytesRead = fileHandle.read(buf, 0, (int) len);
-		} catch (IOException ex) {
-			final String msg = "Cannot read derived file: " + this.toString();
-			logger.log(Level.SEVERE, msg, ex);
-			//TODO decide if to swallow exception in this case, file could have been deleted or moved
-			throw new TskCoreException(msg, ex);
-		}
-
-		return bytesRead;
-	}
-
-	/**
-	 * Get derived method for this derived file if it exists, or null
+	 * @return Derived method or null.
 	 *
-	 * @return derived method if exists, or null
-	 * @throws TskCoreException exception thrown when critical error occurred
-	 * and derived method could not be queried
+	 * @throws TskCoreException if there was an error querying the case
+	 *                          database.
 	 */
 	public synchronized DerivedMethod getDerivedMethod() throws TskCoreException {
 		if (derivedMethod == null && hasDerivedMethod == true) {
@@ -299,40 +134,79 @@ public class DerivedFile extends AbstractFile {
 					hasDerivedMethod = false;  //do not attempt to lazy load
 				}
 			} catch (TskCoreException e) {
-				String msg = "Error getting derived method for file id: " + getId();
+				String msg = MessageFormat.format(bundle.getString("DerviedFile.derivedMethod.exception.msg1.text"), getId());
 				logger.log(Level.WARNING, msg, e);
 				throw new TskCoreException(msg, e);
 			}
 		}
-
 		return derivedMethod;
 	}
 
+	/**
+	 * Accepts a content visitor (Visitor design pattern).
+	 *
+	 * @param visitor A ContentVisitor supplying an algorithm to run using this
+	 *                derived file as input.
+	 *
+	 * @return The output of the algorithm.
+	 */
+	@Override
+	public <T> T accept(SleuthkitItemVisitor<T> v) {
+		return v.visit(this);
+	}
+
+	/**
+	 * Accepts a Sleuthkit item visitor (Visitor design pattern).
+	 *
+	 * @param visitor A SleuthkitItemVisitor supplying an algorithm to run using
+	 *                this derived file as input.
+	 *
+	 * @return The output of the algorithm.
+	 */
+	@Override
+	public <T> T accept(ContentVisitor<T> v) {
+		return v.visit(this);
+	}
+
+	/**
+	 * Closes this derived file, if it was open.
+	 *
+	 * @throws Throwable
+	 */
 	@Override
 	protected void finalize() throws Throwable {
 		try {
 			close();
 		} finally {
-			super.finalize(); //To change body of generated methods, choose Tools | Templates.
+			super.finalize();
 		}
 	}
 
+	/**
+	 * Provides a string representation of this derived file.
+	 *
+	 * @param preserveState True if state should be included in the string
+	 *                      representation of this object.
+	 *
+	 */
 	@Override
-	public String toString() {
-		return "DerivedFile{" + "localPath=" + localPath + ", localAbsPath=" + localAbsPath + ", derivedMethod=" + derivedMethod + ", fileHandle=" + fileHandle + ", hasDerivedMethod=" + hasDerivedMethod + '}';
+	public String toString(boolean preserveState) {
+		return super.toString(preserveState) + "DerivedFile{" //NON-NLS
+				+ "derivedMethod=" + derivedMethod //NON-NLS
+				+ ", hasDerivedMethod=" + hasDerivedMethod //NON-NLS
+				+ '}';
 	}
 
 	/**
-	 * Method used to derive the file super-set of tsk_files_derived and
-	 * tsk_files_derived_method tables
+	 * A description of the method used to derive a file.
 	 */
 	public static class DerivedMethod {
 
-		private int derivedId; ///< Unique id for this derivation method.
-		private String toolName; ///< Name of derivation method/tool
-		private String toolVersion; ///< Version of tool used in derivation method
-		private String other; ///< Other details 
-		private String rederiveDetails; ///< details to rederive specific to this method
+		private final int derivedId;
+		private String toolName;
+		private String toolVersion;
+		private String other;
+		private String rederiveDetails;
 
 		public DerivedMethod(int derivedId, String rederiveDetails) {
 			this.derivedId = derivedId;
@@ -379,7 +253,60 @@ public class DerivedFile extends AbstractFile {
 
 		@Override
 		public String toString() {
-			return "DerivedMethod{" + "derived_id=" + derivedId + ", toolName=" + toolName + ", toolVersion=" + toolVersion + ", other=" + other + ", rederiveDetails=" + rederiveDetails + '}';
+			return "DerivedMethod{" + "derived_id=" + derivedId + ", toolName=" + toolName + ", toolVersion=" + toolVersion + ", other=" + other + ", rederiveDetails=" + rederiveDetails + '}'; //NON-NLS
 		}
 	}
+
+	/**
+	 * Constructs a representation of a file or directory that has been derived
+	 * from another file and is stored outside of the data source (e.g., on a
+	 * user's machine). A typical example of a derived file is a file extracted
+	 * from an archive file.
+	 *
+	 * @param db         The case database to which the file has been added.
+	 * @param objId      The object id of the file in the case database.
+	 * @param name       The name of the file.
+	 * @param dirType    The type of the file, usually as reported in the name
+	 *                   structure of the file system. May be set to
+	 *                   TSK_FS_NAME_TYPE_ENUM.UNDEF.
+	 * @param metaType   The type of the file, usually as reported in the
+	 *                   metadata structure of the file system. May be set to
+	 *                   TSK_FS_META_TYPE_ENUM.TSK_FS_META_TYPE_UNDEF.
+	 * @param dirFlag    The allocated status of the file, usually as reported
+	 *                   in the name structure of the file system.
+	 * @param metaFlags  The allocated status of the file, usually as reported
+	 *                   in the metadata structure of the file system.
+	 * @param size       The size of the file.
+	 * @param ctime      The changed time of the file.
+	 * @param crtime     The created time of the file.
+	 * @param atime      The accessed time of the file.
+	 * @param mtime      The modified time of the file.
+	 * @param md5Hash    The MD5 hash of the file, null if not yet calculated.
+	 * @param knownState The known state of the file from a hash database
+	 *                   lookup, null if not yet looked up.
+	 * @param parentPath The path of the parent of the file.
+	 * @param localPath  The absolute path of the file in secondary storage.
+	 * @param parentId   The object id of parent of the file.
+	 *
+	 * @deprecated Do not make subclasses outside of this package.
+	 */
+	@Deprecated
+	@SuppressWarnings("deprecation")
+	protected DerivedFile(SleuthkitCase db,
+			long objId,
+			String name,
+			TSK_FS_NAME_TYPE_ENUM dirType, TSK_FS_META_TYPE_ENUM metaType,
+			TSK_FS_NAME_FLAG_ENUM dirFlag, short metaFlags,
+			long size,
+			long ctime, long crtime, long atime, long mtime,
+			String md5Hash, FileKnown knownState,
+			String parentPath,
+			String localPath,
+			long parentId) {
+		this(db, objId, db.getDataSourceObjectId(objId), name, dirType, metaType, dirFlag, metaFlags, size,
+				ctime, crtime, atime, mtime,
+				md5Hash, null, knownState,
+				parentPath, localPath, parentId, null, TskData.EncodingType.NONE, null);
+	}
+
 }

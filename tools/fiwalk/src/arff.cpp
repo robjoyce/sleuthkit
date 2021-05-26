@@ -17,7 +17,7 @@
  * not subject to copyright.
  */
 
-#include "tsk3/tsk_tools_i.h"
+#include "tsk/tsk_tools_i.h"
 #include "fiwalk.h"
 #include <sys/types.h>
 
@@ -66,7 +66,7 @@ bool arff::is_weka_date(const string &s)
        s[10]==' ' &&
        isdigit(s[11]) && isdigit(s[12]) && s[13]==':' &&       
        isdigit(s[14]) && isdigit(s[15]) && s[16]==':' &&       
-       isdigit(s[17]) && isdigit(s[17]) && s.size()==19) return true;
+       isdigit(s[17]) && isdigit(s[18]) && s.size()==19) return true;
     return false;
 }
 
@@ -251,7 +251,7 @@ void arff::add_value(string name,int64_t value)
 	strftime(buf,sizeof(buf),TM_FORMAT,gmtime((time_t *)&valuet));
 	break;
     default:
-	sprintf(buf,"%"PRIu64,value);
+	sprintf(buf,"%" PRIu64,value);
 	break;
     }
     (*values.back())[code] = buf;

@@ -33,7 +33,7 @@
 
 
 /* config.h must be first */
-#include "tsk3/tsk_tools_i.h"
+#include "tsk/tsk_tools_i.h"
 
 #include <stdio.h>
 #include "fiwalk.h"
@@ -50,6 +50,11 @@
 #include <windows.h>
 #define _CRT_SECURE_NO_WARNINGS
 //#define mkdir _mkdir
+#endif
+
+
+#ifdef HAVE_SYS_RESOURCE_H
+#include <sys/resource.h>
 #endif
 
 /* Output Devices */
@@ -73,6 +78,7 @@ bool opt_allocated_only = false;
 bool opt_body_file = false;
 bool opt_ignore_ntfs_system_files = false;
 bool opt_parent_tracking = false;
+bool opt_sector_hash = false;
 
 const char *config_file = 0;
 int  file_count_max = 0;
@@ -84,8 +90,6 @@ int  opt_k = 4;
 
 
 u_int	sectorhash_size=512;
-//bool	opt_compute_sector_hashes = false;
-//bool	opt_print_sector_hashes = false;
 
 namelist_t namelist;		// names of files that we want to find
 
@@ -148,6 +152,7 @@ void usage()
     printf("Ways to make this program run slower:\n");
     printf("    -M = Report MD5 for each file (default on)\n");
     printf("    -1 = Report SHA1 for each file (default on)\n");
+    printf("    -S nnnn = Perform sector hashes every nnnn bytes\n");
 #ifdef HAVE_LIBMAGIC
     printf("    -f = Enable LIBMAGIC (disabled by default)");
 #else
@@ -227,7 +232,7 @@ void comment(const char *format,...)
 void partition_info(const string &name,const string &value,const string &attribute)
 {
 
-    if(name.find(" ")<0) err(1,"partition_info(%s) has a space in it",cstr(name));
+    if(name.find(" ")!=string::npos) err(1,"partition_info(%s) has a space in it",cstr(name));
     if(a) a->add_comment(name + ": " + value);
     if(t && !opt_body_file) fputs(cstr(name + ": " + value + "\n"),t);
     if(x) x->xmlout(name,value,attribute,true);
@@ -245,6 +250,12 @@ void partition_info(const string &name,long i)
     partition_info(name,buf,fw_empty);
 }
 
+void partition_info(const string &name, const struct timeval &ts)
+{
+    char buf[64];
+    sprintf(buf, "%d.%06d",(int)ts.tv_sec, (int)ts.tv_usec);
+    partition_info(name,buf,fw_empty);
+}
 
 /****************************************************************
  * These file_info(name,value) are called for each extracted attribute
@@ -265,7 +276,7 @@ void file_info(const string &name,const string &value)
 {
     if(a) a->add_value(name,value); 
     if(t && !opt_body_file) fputs(cstr(name + ": " + value + "\n"),t); 
-    if(x) x->xmlout(name,value); 
+    if(x) x->xmlout(name,value,std::string(),true); // escape the XML
 }
 
 /* this file_info is for sending through a hash. */
@@ -296,8 +307,8 @@ void file_info(const string name, int64_t value)
 {
     if(a) a->add_value(name,value); 
     if(t || x){
-	if(t) fprintf(t,"%s: %"PRId64"\n",cstr(name),value);
-	if(x) x->xmlprintf(name,"","%"PRId64,value);
+	if(t) fprintf(t,"%s: %" PRId64 "\n",cstr(name),value);
+	if(x) x->xmlprintf(name,"","%" PRId64,value);
     }
 }
 
@@ -390,10 +401,10 @@ bool has_unprintable(const u_char *buf,int buflen)
     return false;
 }
 
-void sig_info(int arg)
+void sig_info(int /*arg*/)
 {
     if(a){
-	printf("a=%p\n",a);
+	printf("a=%p\n", (void*)a);
 	printf("\n");
     }
 }
@@ -428,7 +439,7 @@ int af_display_as_hex(const char *segname)
 }
 #endif
 
-#if _MSC_VER
+#ifdef TSK_WIN32
 
 static int convert(TSK_TCHAR *OPTARG, char **_opt_arg)
 {
@@ -466,7 +477,10 @@ int main(int argc, char * const *argv1)
     bool opt_zap = false;
     u_int sector_size=512;			// defaults to 512; may be changed by AFF
 
-    int t0 = time(0);
+    struct timeval tv0;
+    struct timeval tv1;
+    gettimeofday(&tv0,0);
+
     TSK_TCHAR * const *argv;
 
 #ifdef TSK_WIN32
@@ -483,9 +497,9 @@ int main(int argc, char * const *argv1)
 	argv = (TSK_TCHAR * const*) argv1;
 #endif
 	
-    while ((ch = GETOPT(argc, argv, _TSK_T("A:a:C:dfG:gmv1IMX:T:VZn:c:b:xOzh?"))) > 0 ) { // s: removed
+    while ((ch = GETOPT(argc, argv, _TSK_T("A:a:C:dfG:gmv1IMX:S:T:VZn:c:b:xOzh?"))) > 0 ) { // s: removed
 	switch (ch) {
-	case _TSK_T('1'): opt_sha1++;break;
+	case _TSK_T('1'): opt_sha1 = true;break;
 	case _TSK_T('m'):
 	    opt_body_file = 1;
 	    opt_sha1 = 0;
@@ -493,7 +507,7 @@ int main(int argc, char * const *argv1)
 	    t = stdout;
 	    break;
 	case _TSK_T('A'):
-#ifdef _MSC_VER
+#ifdef TSK_WIN32
 		convert(OPTARG, &opt_arg);
 		arff_fn = opt_arg;
 #else
@@ -502,21 +516,19 @@ int main(int argc, char * const *argv1)
 		break;
 	case _TSK_T('C'): file_count_max = TATOI(OPTARG);break;
 	case _TSK_T('d'): opt_debug++; break;
-//	case _TSK_T('E'):
-//	    opt_print_sector_hashes = true;
-//	    opt_compute_sector_hashes=true;
-//	    break;
 	case _TSK_T('f'): opt_magic = true;break;
 	case _TSK_T('g'): opt_no_data = true; break;
   case _TSK_T('b'): opt_get_fragments = false; break;
 	case _TSK_T('G'): opt_maxgig = TATOI(OPTARG);break;
 	case _TSK_T('h'): usage(); break;
 	case _TSK_T('I'): opt_ignore_ntfs_system_files=true;break;
-	case _TSK_T('M'): opt_md5++; break;
+	case _TSK_T('M'): opt_md5 = true;
 	case _TSK_T('O'): opt_allocated_only=true; break;
-//	case _TSK_T('S'): sectorhash_size = TATOI(OPTARG); break;
+	case _TSK_T('S'):
+            opt_sector_hash = true;
+            sectorhash_size = TATOI(OPTARG); break;
 	case _TSK_T('T'):
-#ifdef _MSC_VER
+#ifdef TSK_WIN32
 		convert(OPTARG, &opt_arg);
 		text_fn = opt_arg;
 #else
@@ -525,7 +537,7 @@ int main(int argc, char * const *argv1)
 		break;
 	case _TSK_T('V'): print_version();exit(0);
 	case _TSK_T('X'): 
-#ifdef _MSC_VER
+#ifdef TSK_WIN32
 		convert(OPTARG, &opt_arg);
 		xml_fn = new string(opt_arg);
 #else
@@ -535,7 +547,7 @@ int main(int argc, char * const *argv1)
 	case _TSK_T('x'): opt_x = true;break;
 	case _TSK_T('Z'): opt_zap = true;break;
 	case _TSK_T('a'): 
-#ifdef _MSC_VER
+#ifdef TSK_WIN32
 		convert(OPTARG, &opt_arg);
 		audit_file = opt_arg;
 #else
@@ -543,7 +555,7 @@ int main(int argc, char * const *argv1)
 #endif
 		break;
 	case _TSK_T('c'): 
-#ifdef _MSC_VER
+#ifdef TSK_WIN32
 		convert(OPTARG, &opt_arg);
 		config_file = opt_arg;
 #else
@@ -574,7 +586,7 @@ int main(int argc, char * const *argv1)
 	argv += OPTIND;
 	argv1 += OPTIND;
 
-#ifdef _MSC_VER
+#ifdef TSK_WIN32
 		convert(argv[0],&argv_0);
 		const char *filename = argv_0;
 #else
@@ -650,13 +662,6 @@ int main(int argc, char * const *argv1)
 	fprintf(stderr,"ERROR: fiwalk was compiled without AFF support.\n");
 	exit(0);
 #else
-#if 0
-	if((tsk_img_type_supported() & TSK_IMG_TYPE_AFF_AFF)==0){
-	    fprintf(stderr,"ERROR: fiwalk was compiled with AFF support but the TSK library is not.\n");
-	    fprintf(stderr,"tsk_img_type_supported=0x%x\n",tsk_img_type_supported());
-	    exit(0);
-	}
-#endif
 #endif
     }
 
@@ -679,11 +684,12 @@ int main(int argc, char * const *argv1)
     /* output per-run metadata for XML output */
     if(x){
 	/* Output Dublin Core information */
-	x->push("dfxml","version='1.0'");
-	x->push("metadata",
+	x->push("dfxml",
 		"\n  xmlns='http://www.forensicswiki.org/wiki/Category:Digital_Forensics_XML'"
-		"\n  xmlns:xsi='http://www.w3.org/2001/XMLSchema-instance' "
-		"\n  xmlns:dc='http://purl.org/dc/elements/1.1/'" );
+		"\n  xmlns:xsi='http://www.w3.org/2001/XMLSchema-instance'"
+		"\n  xmlns:dc='http://purl.org/dc/elements/1.1/'"
+		"\n  version='1.0'" );
+	x->push("metadata", "");
 	x->xmlout("dc:type","Disk Image",fw_empty,false);
 	x->pop();
 	    
@@ -714,7 +720,7 @@ int main(int argc, char * const *argv1)
     signal(SIGINFO,sig_info);
 #endif
 
-#if _MSC_VER
+#ifdef TSK_WIN32
     int count = process_image_file(argc,argv1,audit_file,sector_size);
     if(count<=0 || sector_size!=512){
 	comment("Retrying with 512 byte sector size.");
@@ -728,25 +734,41 @@ int main(int argc, char * const *argv1)
     }
 #endif
 
-    int t1 = time(0);
-    comment("clock: %d",t1-t0);
+    /* Calculate time elapsed (reported as a comment and with rusage) */
+    struct timeval tv;
+    char tvbuf[64];
+    gettimeofday(&tv1,0);
+    tv.tv_sec = tv1.tv_sec - tv0.tv_sec;
+    if(tv1.tv_usec > tv0.tv_usec){
+        tv.tv_usec = tv1.tv_usec - tv0.tv_usec;
+    } else {
+        tv.tv_sec--;
+        tv.tv_usec = (tv1.tv_usec+1000000) - tv0.tv_usec;
+    }
+    sprintf(tvbuf, "%d.%06d",(int)tv.tv_sec, (int)tv.tv_usec);
+
+    comment("clock: %s",tvbuf);
+
+#ifdef HAVE_SYS_RESOURCE_H
 #ifdef HAVE_GETRUSAGE
     /* Print usage information */
     struct rusage ru;
     memset(&ru,0,sizeof(ru));
     if(getrusage(RUSAGE_SELF,&ru)==0){
-	if(x) x->push("runstats");
-	partition_info("user_seconds",ru.ru_utime.tv_sec);
-	partition_info("system_seconds",ru.ru_stime.tv_sec);
+	if(x) x->push("rusage");
+	partition_info("utime",ru.ru_utime);
+	partition_info("stime",ru.ru_stime);
 	partition_info("maxrss",ru.ru_maxrss);
-	partition_info("reclaims",ru.ru_minflt);
-	partition_info("faults",ru.ru_majflt);
-	partition_info("swaps",ru.ru_nswap);
-	partition_info("inputs",ru.ru_inblock);
-	partition_info("outputs",ru.ru_oublock);
-	partition_info("stop_time",cstr(mytime()));
+	partition_info("minflt",ru.ru_minflt);
+	partition_info("majflt",ru.ru_majflt);
+	partition_info("nswap",ru.ru_nswap);
+	partition_info("inblock",ru.ru_inblock);
+	partition_info("oublock",ru.ru_oublock);
+	partition_info("clocktime",tv);
+	comment("stop_time: %s",cstr(mytime()));
 	if(x) x->pop();
     }
+#endif
 #endif
 
     // *** Added <finished time="(time_t)" duration="<seconds>" />

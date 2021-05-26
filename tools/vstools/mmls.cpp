@@ -9,7 +9,7 @@
  *
  * This software is distributed under the Common Public License 1.0
  */
-#include "tsk3/tsk_tools_i.h"
+#include "tsk/tsk_tools_i.h"
 
 static TSK_TCHAR *progname;
 
@@ -54,27 +54,27 @@ usage()
  * Prints the layout information
  * */
 static TSK_WALK_RET_ENUM
-part_act(TSK_VS_INFO * vs, const TSK_VS_PART_INFO * part, void *ptr)
+part_act(TSK_VS_INFO * vs, const TSK_VS_PART_INFO * part, void * /*ptr*/)
 {
     if (part->flags & TSK_VS_PART_FLAG_META)
-        tsk_printf("%.2" PRIuPNUM ":  Meta    ", part->addr);
+        tsk_printf("%.3" PRIuPNUM ":  Meta      ", part->addr);
 
     /* Neither table or slot were given */
     else if ((part->table_num == -1) && (part->slot_num == -1))
-        tsk_printf("%.2" PRIuPNUM ":  -----   ", part->addr);
+        tsk_printf("%.3" PRIuPNUM ":  -------   ", part->addr);
 
     /* Table was not given, but slot was */
     else if ((part->table_num == -1) && (part->slot_num != -1))
-        tsk_printf("%.2" PRIuPNUM ":  %.2" PRIu8 "      ",
+        tsk_printf("%.3" PRIuPNUM ":  %.3" PRIu8 "       ",
             part->addr, part->slot_num);
 
     /* The Table was given, but slot wasn't */
     else if ((part->table_num != -1) && (part->slot_num == -1))
-        tsk_printf("%.2" PRIuPNUM ":  -----   ", part->addr);
+        tsk_printf("%.3" PRIuPNUM ":  -------   ", part->addr);
 
     /* Both table and slot were given */
     else if ((part->table_num != -1) && (part->slot_num != -1))
-        tsk_printf("%.2" PRIuPNUM ":  %.2d:%.2d   ",
+        tsk_printf("%.3" PRIuPNUM ":  %.3d:%.3d   ",
             part->addr, part->table_num, part->slot_num);
 
     if (print_bytes) {
@@ -86,12 +86,12 @@ part_act(TSK_VS_INFO * vs, const TSK_VS_PART_INFO * part, void *ptr)
             size /= 1024;
             unit = 'K';
         }
-        
+
         if (size > 1024) {
             size /= 1024;
             unit = 'M';
         }
-        
+
         if (size > 1024) {
             size /= 1024;
             unit = 'G';
@@ -101,11 +101,10 @@ part_act(TSK_VS_INFO * vs, const TSK_VS_PART_INFO * part, void *ptr)
             size /= 1024;
             unit = 'T';
         }
-        
-        
+
         /* Print the layout */
         tsk_printf("%.10" PRIuDADDR "   %.10" PRIuDADDR "   %.10" PRIuDADDR
-            "   %.4" PRIuOFF "%c   %s\n", part->start,
+            "   %.4" PRIdOFF "%c   %s\n", part->start,
             (TSK_DADDR_T) (part->start + part->len - 1), part->len, size,
             unit, part->desc);
     }
@@ -119,8 +118,9 @@ part_act(TSK_VS_INFO * vs, const TSK_VS_PART_INFO * part, void *ptr)
 
     if ((recurse) && (vs->vstype == TSK_VS_TYPE_DOS)
         && (part->flags == TSK_VS_PART_FLAG_ALLOC)) {
-        if (recurse_cnt < 64)
+        if (recurse_cnt < 64) {
             recurse_list[recurse_cnt++] = part->start * part->vs->block_size;
+        }
     }
 
     return TSK_WALK_CONT;
@@ -135,10 +135,10 @@ print_header(const TSK_VS_INFO * vs)
     tsk_printf("Units are in %d-byte sectors\n\n", vs->block_size);
     if (print_bytes)
         tsk_printf
-            ("     Slot    Start        End          Length       Size    Description\n");
+            ("      Slot      Start        End          Length       Size    Description\n");
     else
         tsk_printf
-            ("     Slot    Start        End          Length       Description\n");
+            ("      Slot      Start        End          Length       Description\n");
 }
 
 
@@ -268,13 +268,13 @@ main(int argc, char **argv1)
 
     if (img == NULL) {
         tsk_error_print(stderr);
-        exit(1);
+        goto on_error;
     }
     if ((imgaddr * img->sector_size) >= img->size) {
         tsk_fprintf(stderr,
             "Sector offset supplied is larger than disk image (maximum: %"
             PRIu64 ")\n", img->size / img->sector_size);
-        exit(1);
+        goto on_error;
     }
 
     /* process the partition tables */
@@ -283,8 +283,7 @@ main(int argc, char **argv1)
         tsk_error_print(stderr);
         if (tsk_error_get_errno() == TSK_ERR_VS_UNSUPTYPE)
             tsk_vs_type_print(stderr);
-        tsk_img_close(img);
-        exit(1);
+        goto on_error;
     }
 
     print_header(vs);
@@ -293,11 +292,9 @@ main(int argc, char **argv1)
             (TSK_VS_PART_FLAG_ENUM) flags, part_act, NULL)) {
         tsk_error_print(stderr);
         tsk_vs_close(vs);
-        tsk_img_close(img);
-        exit(1);
+        goto on_error;
     }
 
-    tsk_vs_close(vs);
     if ((recurse) && (vs->vstype == TSK_VS_TYPE_DOS)) {
         int i;
         /* disable recursing incase we hit another DOS partition
@@ -305,15 +302,16 @@ main(int argc, char **argv1)
         recurse = 0;
 
         for (i = 0; i < recurse_cnt; i++) {
-            vs = tsk_vs_open(img, recurse_list[i], TSK_VS_TYPE_DETECT);
-            if (vs != NULL) {
+            TSK_VS_INFO *vs2;
+            vs2 = tsk_vs_open(img, recurse_list[i], TSK_VS_TYPE_DETECT);
+            if (vs2 != NULL) {
                 tsk_printf("\n\n");
-                print_header(vs);
-                if (tsk_vs_part_walk(vs, 0, vs->part_count - 1,
+                print_header(vs2);
+                if (tsk_vs_part_walk(vs2, 0, vs2->part_count - 1,
                         (TSK_VS_PART_FLAG_ENUM) flags, part_act, NULL)) {
                     tsk_error_reset();
                 }
-                tsk_vs_close(vs);
+                tsk_vs_close(vs2);
             }
             else {
                 /* Ignore error in this case and reset */
@@ -321,7 +319,16 @@ main(int argc, char **argv1)
             }
         }
     }
+    // TODO: tsk error leaks here.
+    // is the memory managed by pthread_setspecific(pt_tls_key, ...) freed?
 
+    tsk_vs_close(vs);
     tsk_img_close(img);
     exit(0);
+
+on_error:
+    if( img != NULL ) {
+        tsk_img_close( img );
+    }
+    exit( 1 );
 }

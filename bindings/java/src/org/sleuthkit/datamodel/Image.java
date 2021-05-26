@@ -1,15 +1,15 @@
 /*
- * Autopsy Forensic Browser
- * 
- * Copyright 2011 Basis Technology Corp.
+ * Sleuth Kit Data Model
+ *
+ * Copyright 2011-2018 Basis Technology Corp.
  * Contact: carrier <at> sleuthkit <dot> org
- * 
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *     http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -18,11 +18,17 @@
  */
 package org.sleuthkit.datamodel;
 
+import java.text.MessageFormat;
+import java.util.ResourceBundle;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.io.File;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
 
 /**
  * Represents a disk image file, stored in tsk_image_info. Populated based on
@@ -30,49 +36,106 @@ import java.util.logging.Logger;
  *
  * Caches internal tsk image handle and reuses it for reads
  */
-public class Image extends AbstractContent {
+public class Image extends AbstractContent implements DataSource {
 	//data about image
 
-	private long type, ssize, size;
-	private String[] paths;
+	private final long type, ssize;
+	private long size;
+	private final String[] paths;
 	private volatile long imageHandle = 0;
-	private String timezone;
+	private final String deviceId, timezone;
+	private String md5, sha1, sha256;
+	private static ResourceBundle bundle = ResourceBundle.getBundle("org.sleuthkit.datamodel.Bundle");
+
+	private static final Logger LOGGER = Logger.getLogger(Image.class.getName());
 
 	/**
-	 * constructor most inputs are from the database
+	 * Create a disk image.
 	 *
-	 * @param db database object
-	 * @param obj_id
-	 * @param type
-	 * @param ssize
-	 * @param name
-	 * @param paths
-	 * @param timezone
+	 * Note: Most inputs originate from the database.
+	 *
+	 * @param db       Case database.
+	 * @param obj_id   Object ID.
+	 * @param type     Image type.
+	 * @param ssize    Sector size.
+	 * @param name     Display name.
+	 * @param paths    Image paths.
+	 * @param timezone Timezone.
+	 * @param md5      MD5 hash.
+	 *
+	 * @throws TskCoreException
+	 *
+	 * @deprecated Use the constructor that takes a device ID and size.
 	 */
-	protected Image(SleuthkitCase db, long obj_id, long type, long ssize, String name, String[] paths, String timezone) throws TskCoreException {
+	@Deprecated
+	protected Image(SleuthkitCase db, long obj_id, long type, long ssize, String name, String[] paths, String timezone, String md5) throws TskCoreException {
 		super(db, obj_id, name);
+		this.deviceId = "";
 		this.type = type;
 		this.ssize = ssize;
 		this.paths = paths;
 		this.timezone = timezone;
 		this.size = 0;
+		this.md5 = md5;
+		this.sha1 = "";
+		this.sha256 = "";
+	}
+
+	/**
+	 * Create a disk image.
+	 *
+	 * Note: Most inputs originate from the database.
+	 *
+	 * @param db       Case database.
+	 * @param obj_id   Object ID.
+	 * @param type     Image type.
+	 * @param deviceId Device ID.
+	 * @param ssize    Sector size.
+	 * @param name     Display name.
+	 * @param paths    Image paths.
+	 * @param timezone Timezone.
+	 * @param md5      MD5 hash.
+	 * @param size     Size.
+	 */
+	Image(SleuthkitCase db, long obj_id, long type, String deviceId, long ssize, String name, String[] paths, String timezone, 
+			String md5, String sha1, String sha256, long size) throws TskCoreException {
+		super(db, obj_id, name);
+		this.deviceId = deviceId;
+		this.type = type;
+		this.ssize = ssize;
+		this.paths = paths;
+		this.timezone = timezone;
+		this.size = size;
+		this.md5 = md5;
+		this.sha1 = sha1;
+		this.sha256 = sha256;
 	}
 
 	/**
 	 * Get the handle to the sleuthkit image info object
 	 *
 	 * @return the object pointer
+	 *
+	 * @throws TskCoreException
 	 */
 	public synchronized long getImageHandle() throws TskCoreException {
+		if (paths.length == 0) {
+			throw new TskCoreException("Image has no associated paths");
+		}
+		
 		if (imageHandle == 0) {
-			imageHandle = SleuthkitJNI.openImage(paths);
+			imageHandle = SleuthkitJNI.openImage(paths, (int)ssize, getSleuthkitCase());
 		}
 
 		return imageHandle;
 	}
+	
+	synchronized void setImageHandle(long imageHandle) {
+		this.imageHandle = imageHandle;
+	}
 
 	@Override
-	public Image getImage() {
+	public Content getDataSource() {
 		return this;
 	}
 
@@ -81,13 +144,11 @@ public class Image extends AbstractContent {
 		//frees nothing, as we are caching image handles
 	}
 
-	
-	
 	@Override
 	public void finalize() throws Throwable {
 		try {
 			if (imageHandle != 0) {
-				SleuthkitJNI.closeImg(imageHandle);
+				// SleuthkitJNI.closeImg(imageHandle); // closeImg is currently a no-op
 				imageHandle = 0;
 			}
 		} finally {
@@ -97,6 +158,11 @@ public class Image extends AbstractContent {
 
 	@Override
 	public int read(byte[] buf, long offset, long len) throws TskCoreException {
+		// If there are no paths, don't attempt to read the image
+		if (paths.length == 0) {
+			return 0;
+		}
+		
 		// read from the image
 		return SleuthkitJNI.readImg(getImageHandle(), buf, offset, len);
 	}
@@ -110,7 +176,7 @@ public class Image extends AbstractContent {
 					size = SleuthkitJNI.findDeviceSize(paths[0]);
 				}
 			} catch (TskCoreException ex) {
-				Logger.getLogger(Image.class.getName()).log(Level.SEVERE, "Could not find image size, image: " + this.getId(), ex);
+				Logger.getLogger(Image.class.getName()).log(Level.SEVERE, "Could not find image size, image: " + this.getId(), ex); //NON-NLS
 			}
 		}
 		return size;
@@ -122,8 +188,8 @@ public class Image extends AbstractContent {
 	 *
 	 * @return image type
 	 */
-	public long getType() {
-		return type;
+	public TskData.TSK_IMG_TYPE_ENUM getType() {
+		return TskData.TSK_IMG_TYPE_ENUM.valueOf(type);
 	}
 
 	/**
@@ -137,7 +203,7 @@ public class Image extends AbstractContent {
 
 	@Override
 	public String getUniquePath() throws TskCoreException {
-		return "/img_" + getName();
+		return "/img_" + getName(); //NON-NLS
 	}
 
 	/**
@@ -151,6 +217,7 @@ public class Image extends AbstractContent {
 
 	/**
 	 * @return a list of VolumeSystem associated with this Image.
+	 *
 	 * @throws TskCoreException
 	 */
 	public List<VolumeSystem> getVolumeSystems() throws TskCoreException {
@@ -168,6 +235,7 @@ public class Image extends AbstractContent {
 
 	/**
 	 * @return a list of Volume associated with this Image.
+	 *
 	 * @throws TskCoreException
 	 */
 	public List<Volume> getVolumes() throws TskCoreException {
@@ -185,13 +253,14 @@ public class Image extends AbstractContent {
 
 	/**
 	 * @return a list of FileSystems in this Image. This includes FileSystems
-	 * that are both children of this Image as well as children of Volumes in
-	 * this image.
+	 *         that are both children of this Image as well as children of
+	 *         Volumes in this image.
+	 *
 	 * @throws TskCoreException
 	 */
 	public List<FileSystem> getFileSystems() throws TskCoreException {
-		List<FileSystem> fs = new ArrayList<FileSystem>();
-		fs.addAll(getSleuthkitCase().getFileSystems(this));
+		List<FileSystem> fs = new ArrayList<>();
+		fs.addAll(getSleuthkitCase().getImageFileSystems(this));
 		return fs;
 	}
 
@@ -200,96 +269,9 @@ public class Image extends AbstractContent {
 	 *
 	 * @return timezone string representation
 	 */
+	@Override
 	public String getTimeZone() {
 		return timezone;
-	}
-
-	// ----- Methods for Image Type conversion / mapping -----
-	/**
-	 * Convert image type id to string value
-	 *
-	 * @param imageType to convert
-	 * @return string representation of the image type
-	 */
-	public static String imageTypeToValue(long imageType) {
-
-		String result = "";
-
-		for (TskData.TSK_IMG_TYPE_ENUM imgType : TskData.TSK_IMG_TYPE_ENUM.values()) {
-			if (imgType.getImageType() == imageType) {
-				result = imgType.toString();
-			}
-		}
-		return result;
-	}
-
-	/**
-	 * Convert image type value string to image type id
-	 *
-	 * @param imageType value string to convert
-	 * @return image type id
-	 */
-	public static long valueToImageType(String imageType) {
-
-		long result = 0;
-
-		for (TskData.TSK_IMG_TYPE_ENUM imgType : TskData.TSK_IMG_TYPE_ENUM.values()) {
-			if (imgType.toString().equals(imageType)) {
-				result = imgType.getImageType();
-			}
-		}
-		return result;
-	}
-
-	/**
-	 * Convert image type id to string representation
-	 *
-	 * @param imageType to convert
-	 * @return user-readable string representation of the image type
-	 */
-	public static String imageTypeToString(long imageType) {
-
-		String result = "";
-
-		long detect = TskData.TSK_IMG_TYPE_ENUM.TSK_IMG_TYPE_DETECT.getImageType();
-		long raw = TskData.TSK_IMG_TYPE_ENUM.TSK_IMG_TYPE_RAW_SING.getImageType();
-		long split = TskData.TSK_IMG_TYPE_ENUM.TSK_IMG_TYPE_RAW_SPLIT.getImageType();
-		long aff = TskData.TSK_IMG_TYPE_ENUM.TSK_IMG_TYPE_AFF_AFF.getImageType();
-		long afd = TskData.TSK_IMG_TYPE_ENUM.TSK_IMG_TYPE_AFF_AFD.getImageType();
-		long afm = TskData.TSK_IMG_TYPE_ENUM.TSK_IMG_TYPE_AFF_AFM.getImageType();
-		long afflib = TskData.TSK_IMG_TYPE_ENUM.TSK_IMG_TYPE_AFF_ANY.getImageType();
-		long ewf = TskData.TSK_IMG_TYPE_ENUM.TSK_IMG_TYPE_EWF_EWF.getImageType();
-		long unsupported = TskData.TSK_IMG_TYPE_ENUM.TSK_IMG_TYPE_UNSUPP.getImageType();
-
-		if (imageType == detect) {
-			result = "Auto Detection";
-		}
-		if (imageType == raw) {
-			result = "Single raw file (dd)";
-		}
-		if (imageType == split) {
-			result = "Split raw files";
-		}
-		if (imageType == aff) {
-			result = "Advanced Forensic Format";
-		}
-		if (imageType == afd) {
-			result = "AFF Multiple File";
-		}
-		if (imageType == afm) {
-			result = "AFF with external metadata";
-		}
-		if (imageType == afflib) {
-			result = "All AFFLIB image formats (including beta ones)";
-		}
-		if (imageType == ewf) {
-			result = "Expert Witness format (encase)";
-		}
-		if (imageType == unsupported) {
-			result = "Unsupported Image Type";
-		}
-
-		return result;
 	}
 
 	@Override
@@ -311,8 +293,279 @@ public class Image extends AbstractContent {
 	public List<Long> getChildrenIds() throws TskCoreException {
 		return getSleuthkitCase().getImageChildrenIds(this);
 	}
+
 	@Override
-	public String toString(boolean preserveState){
-		return super.toString(preserveState) + "Image [\t" + "\t" + "paths " + Arrays.toString(paths) + "\t" + "size " + size + "\t" + "ssize " + ssize + "\t" + "timezone " + timezone + "\t" + "type " + type + "]\t";
+	public String toString(boolean preserveState) {
+		return super.toString(preserveState) + "Image [\t" + "\t" + "paths " + Arrays.toString(paths) + "\t" + "size " + size + "\t" + "ssize " + ssize + "\t" + "timezone " + timezone + "\t" + "type " + type + "]\t"; //NON-NLS
+	}
+
+	/**
+	 * Test if the file that created this image exists on disk. Does not work on
+	 * local disks - will always return false
+	 *
+	 * @return True if the file still exists
+	 */
+	public Boolean imageFileExists() {
+		if (paths.length > 0) {
+			File imageFile = new File(paths[0]);
+			return imageFile.exists();
+		}
+
+		return false;
+	}
+
+	/**
+	 * Perform some sanity checks on the bounds of the image contents to
+	 * determine if we could be missing some pieces of the image.
+	 *
+	 * @return String of error messages to display to user or empty string if
+	 *         there are no errors
+	 */
+	public String verifyImageSize() {
+		Logger logger1 = Logger.getLogger("verifyImageSizes"); //NON-NLS
+		String errorString = "";
+		try {
+			List<VolumeSystem> volumeSystems = getVolumeSystems();
+			for (VolumeSystem vs : volumeSystems) {
+				List<Volume> volumes = vs.getVolumes();
+				for (Volume v : volumes) {
+					byte[] buf = new byte[512];
+					long endOffset = (v.getStart() + v.getLength()) * 512 - 512;
+					try {
+						int readBytes = read(buf, endOffset, 512);
+						if (readBytes < 0) {
+							logger1.log(Level.WARNING, "Possible Incomplete Image: Error reading volume at offset {0}", endOffset); //NON-NLS
+							errorString = MessageFormat.format(bundle.getString("Image.verifyImageSize.errStr1.text"), endOffset);
+						}
+					} catch (TskCoreException ex) {
+						logger1.log(Level.WARNING, "Possible Incomplete Image: Error reading volume at offset {0}: {1}", new Object[]{endOffset, ex.getLocalizedMessage()}); //NON-NLS
+						errorString = MessageFormat.format(bundle.getString("Image.verifyImageSize.errStr2.text"), endOffset);
+					}
+				}
+			}
+
+			List<FileSystem> fileSystems = getFileSystems();
+			for (FileSystem fs : fileSystems) {
+				long block_size = fs.getBlock_size();
+				long endOffset = fs.getImageOffset() + fs.getSize() - block_size;
+				try {
+					byte[] buf = new byte[(int) block_size];
+					int readBytes = read(buf, endOffset, block_size);
+					if (readBytes < 0) {
+						logger1.log(Level.WARNING, "Possible Incomplete Image: Error reading file system at offset {0}", endOffset); //NON-NLS
+						errorString = MessageFormat.format(bundle.getString("Image.verifyImageSize.errStr3.text"), endOffset);
+					}
+				} catch (TskCoreException ex) {
+					logger1.log(Level.WARNING, "Possible Incomplete Image: Error reading file system at offset {0}: {1}", new Object[]{endOffset, ex.getLocalizedMessage()}); //NON-NLS
+					errorString = MessageFormat.format(bundle.getString("Image.verifyImageSize.errStr4.text"), endOffset);
+				}
+			}
+		} catch (TskException ex) {
+			// do nothing if we got an exception from trying to get file systems and volume systems
+		}
+		return errorString;
+	}
+
+	/**
+	 * Gets the md5 hash value
+	 *
+	 * @return md5 hash if attained(from database), empty string otherwise
+	 * 
+	 * @throws TskCoreException
+	 */
+	public String getMd5() throws TskCoreException {
+		if (md5 == null || md5.isEmpty()) {
+			md5 = getSleuthkitCase().getMd5ImageHash(this);
+		}
+		return md5;
+	}
+	
+	/**
+	 * gets the SHA1 hash value
+	 *
+	 * @return SHA1 hash if attained(from database), empty string otherwise
+	 * 
+	 * @throws TskCoreException on DB error. 
+	 */
+	public String getSha1() throws TskCoreException {
+		if (sha1 == null || sha1.isEmpty()) {
+			sha1 = getSleuthkitCase().getSha1ImageHash(this);
+		}
+		return sha1;
+	}
+	
+	/**
+	 * gets the SHA256 hash value
+	 *
+	 * @return SHA256 hash if attained(from database), empty string otherwise
+	 * 
+	 * @throws TskCoreException
+	 */
+	public String getSha256() throws TskCoreException {
+		if (sha256 == null || sha256.isEmpty()) {
+			sha256 = getSleuthkitCase().getSha256ImageHash(this);
+		}
+		return sha256;
+	}
+	
+	/**
+	 * 
+	 * @param md5
+	 * @throws TskCoreException On DB errors
+	 * @throws TskDataException If hash has already been set
+	 */
+	public void setMD5(String md5) throws TskCoreException, TskDataException {
+		if (getMd5().isEmpty() == false) {
+			throw new TskDataException("MD5 value has already been set");
+		}
+		getSleuthkitCase().setMd5ImageHash(this, md5);
+		this.md5 = md5;
+	}
+	
+	/**
+	 * 
+	 * @param sha1
+	 * @throws TskCoreException On DB errors
+	 * @throws TskDataException If hash has already been set
+	 */
+	public void setSha1(String sha1) throws TskCoreException, TskDataException {
+		if (getSha1().isEmpty() == false) {
+			throw new TskDataException("SHA1 value has already been set");
+		}
+		getSleuthkitCase().setSha1ImageHash(this, sha1);
+		this.sha1 = sha1;
+	}
+	
+	/**
+	 * 
+	 * @param sha256
+	 * @throws TskCoreException On DB errors
+	 * @throws TskDataException If hash has already been set
+	 */
+	public void setSha256(String sha256) throws TskCoreException, TskDataException {
+		if (getSha256().isEmpty() == false) {
+			throw new TskDataException("SHA256 value has already been set");
+		}
+		getSleuthkitCase().setSha256ImageHash(this, sha256);
+		this.sha256 = sha256;
+	}
+
+	/**
+	 * Gets the ASCII-printable identifier for the device associated with the
+	 * data source. This identifier is intended to be unique across multiple
+	 * cases (e.g., a UUID).
+	 *
+	 * @return The device id.
+	 */
+	@Override
+	public String getDeviceId() {
+		return deviceId;
+	}
+
+	/**
+	 * Set the name for this data source.
+	 * 
+	 * @param newName       The new name for the data source
+	 * 
+	 * @throws TskCoreException Thrown if an error occurs while updating the database
+	 */
+	@Override
+	public void setDisplayName(String newName) throws TskCoreException {
+		this.getSleuthkitCase().setImageName(newName, getId());
+	}
+	
+	/**
+	 * Gets the size of the contents of the data source in bytes. This size can
+	 * change as archive files within the data source are expanded, files are
+	 * carved, etc., and is different from the size of the data source as
+	 * returned by Content.getSize, which is the size of the data source as a
+	 * file.
+	 *
+	 * @param sleuthkitCase The sleuthkit case instance from which to make calls
+	 *                      to the database.
+	 *
+	 * @return The size in bytes.
+	 *
+	 * @throws TskCoreException Thrown when there is an issue trying to retrieve
+	 *                          data from the database.
+	 */
+	@Override
+	public long getContentSize(SleuthkitCase sleuthkitCase) throws TskCoreException {
+		SleuthkitCase.CaseDbConnection connection;
+		Statement statement = null;
+		ResultSet resultSet = null;
+		long contentSize = 0;
+
+		connection = sleuthkitCase.getConnection();
+
+		try {
+			statement = connection.createStatement();
+			resultSet = connection.executeQuery(statement, "SELECT SUM (size) FROM tsk_image_info WHERE tsk_image_info.obj_id = " + getId());
+			if (resultSet.next()) {
+				contentSize = resultSet.getLong("sum");
+			}
+		} catch (SQLException ex) {
+			throw new TskCoreException(String.format("There was a problem while querying the database for size data for object ID %d.", getId()), ex);
+		} finally {
+			closeResultSet(resultSet);
+			closeStatement(statement);
+			connection.close();
+		}
+
+		return contentSize;
+	}
+	
+	/**
+	 * Sets the acquisition details field in the case database.
+	 * 
+	 * @param details The acquisition details
+	 * 
+	 * @throws TskCoreException Thrown if the data can not be written
+	 */
+	@Override
+	public void setAcquisitionDetails(String details) throws TskCoreException {
+		getSleuthkitCase().setAcquisitionDetails(this, details);
+	}
+	
+	/**
+	 * Gets the acquisition details field from the case database.
+	 * 
+	 * @return The acquisition details
+	 * 
+	 * @throws TskCoreException Thrown if the data can not be read
+	 */
+	@Override
+	public String getAcquisitionDetails() throws TskCoreException {
+		return getSleuthkitCase().getAcquisitionDetails(this);
+	}	
+
+	/**
+	 * Close a ResultSet.
+	 *
+	 * @param resultSet The ResultSet to be closed.
+	 */
+	private static void closeResultSet(ResultSet resultSet) {
+		if (resultSet != null) {
+			try {
+				resultSet.close();
+			} catch (SQLException ex) {
+				LOGGER.log(Level.SEVERE, "Error closing ResultSet", ex); //NON-NLS
+			}
+		}
+	}
+
+	/**
+	 * Close a Statement.
+	 *
+	 * @param statement The Statement to be closed.
+	 */
+	private static void closeStatement(Statement statement) {
+		if (statement != null) {
+			try {
+				statement.close();
+			} catch (SQLException ex) {
+				LOGGER.log(Level.SEVERE, "Error closing Statement", ex); //NON-NLS
+			}
+		}
 	}
 }

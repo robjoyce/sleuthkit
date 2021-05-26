@@ -1,7 +1,7 @@
 /*
- * Autopsy Forensic Browser
+ * Sleuth Kit Data Model
  * 
- * Copyright 2011 Basis Technology Corp.
+ * Copyright 2011-2017 Basis Technology Corp.
  * Contact: carrier <at> sleuthkit <dot> org
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,6 +20,7 @@ package org.sleuthkit.datamodel;
 
 import java.util.ArrayList;
 import java.util.List;
+import org.sleuthkit.datamodel.TskData.TSK_VS_TYPE_ENUM;
 
 /**
  * Represents a volume system. Populated based on data in database.
@@ -32,10 +33,10 @@ public class VolumeSystem extends AbstractContent {
 	/**
 	 * Constructor most inputs are from the database
 	 *
-	 * @param db case database handle
-	 * @param obj_id the unique content object id for the volume system
-	 * @param name name of the volume system
-	 * @param type type of the volume system
+	 * @param db        case database handle
+	 * @param obj_id    the unique content object id for the volume system
+	 * @param name      name of the volume system
+	 * @param type      type of the volume system
 	 * @param imgOffset offset of the volume system with respect to image
 	 * @param blockSize block size of this volume system
 	 */
@@ -50,7 +51,7 @@ public class VolumeSystem extends AbstractContent {
 	public int read(byte[] readBuffer, long offset, long len) throws TskCoreException {
 		synchronized (this) {
 			if (volumeSystemHandle == 0) {
-				volumeSystemHandle = SleuthkitJNI.openVs(getImage().getImageHandle(), imgOffset);
+				getVolumeSystemHandle();
 			}
 		}
 		return SleuthkitJNI.readVs(volumeSystemHandle, readBuffer, offset, len);
@@ -66,8 +67,8 @@ public class VolumeSystem extends AbstractContent {
 	 *
 	 * @return type
 	 */
-	public long getType() {
-		return type;
+	public TSK_VS_TYPE_ENUM getType() {
+		return TskData.TSK_VS_TYPE_ENUM.valueOf(type);
 	}
 
 	/**
@@ -93,11 +94,18 @@ public class VolumeSystem extends AbstractContent {
 	 * otherwise resuse the existing handle.
 	 *
 	 * @return volume system Handle pointer
+	 *
 	 * @throws TskException
 	 */
 	protected synchronized long getVolumeSystemHandle() throws TskCoreException {
 		if (volumeSystemHandle == 0) {
-			volumeSystemHandle = SleuthkitJNI.openVs(getImage().getImageHandle(), imgOffset);
+			Content dataSource = getDataSource();
+			if ((dataSource != null) && (dataSource instanceof Image)) {
+				Image image = (Image) dataSource;
+				volumeSystemHandle = SleuthkitJNI.openVs(image.getImageHandle(), imgOffset);
+			} else {
+				throw new TskCoreException("Volume System data source is not an image");
+			}
 		}
 
 		return volumeSystemHandle;
@@ -108,7 +116,7 @@ public class VolumeSystem extends AbstractContent {
 		if (volumeSystemHandle != 0) {
 			synchronized (this) {
 				if (volumeSystemHandle != 0) {
-					SleuthkitJNI.closeVs(volumeSystemHandle);
+					// SleuthkitJNI.closeVs(volumeSystemHandle); // closeVs is currently a no-op
 					volumeSystemHandle = 0;
 				}
 			}
@@ -123,7 +131,7 @@ public class VolumeSystem extends AbstractContent {
 			super.finalize();
 		}
 	}
-
+	
 	@Override
 	public <T> T accept(SleuthkitItemVisitor<T> v) {
 		return v.visit(this);
@@ -144,13 +152,9 @@ public class VolumeSystem extends AbstractContent {
 		return getSleuthkitCase().getVolumeSystemChildrenIds(this);
 	}
 
-	@Override
-	public Image getImage() throws TskCoreException {
-		return getParent().getImage();
-	}
-
 	/**
 	 * @return a list of Volumes that are direct children of this VolumeSystem
+	 *
 	 * @throws TskCoreException
 	 */
 	public List<Volume> getVolumes() throws TskCoreException {
@@ -165,6 +169,6 @@ public class VolumeSystem extends AbstractContent {
 
 	@Override
 	public String toString(boolean preserveState) {
-		return super.toString(preserveState) + "VolumeSystem [\t" + "blockSize " + blockSize + "\t" + "imgOffset " + imgOffset + "\t" + "type " + type + "]\t";
+		return super.toString(preserveState) + "VolumeSystem [\t" + "blockSize " + blockSize + "\t" + "imgOffset " + imgOffset + "\t" + "type " + type + "]\t"; //NON-NLS
 	}
 }

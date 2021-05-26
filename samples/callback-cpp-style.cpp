@@ -38,7 +38,7 @@
 #include <string.h>
 #include <stdlib.h>
 
-#include <tsk3/libtsk.h>
+#include <tsk/libtsk.h>
 
 static TskHdbInfo *hdb_info;
 
@@ -50,8 +50,8 @@ static TskHdbInfo *hdb_info;
  * dent_walk callback function 
  */
 static TSK_WALK_RET_ENUM
-fileAct(TskFsFile * fs_file, TSK_OFF_T a_off, TSK_DADDR_T addr,
-    char *buf, size_t size, TSK_FS_BLOCK_FLAG_ENUM flags, void *ptr)
+fileAct(TskFsFile * /*fs_file*/, TSK_OFF_T /*a_off*/, TSK_DADDR_T /*addr*/,
+    char *buf, size_t size, TSK_FS_BLOCK_FLAG_ENUM /*flags*/, void *ptr)
 {
     TSK_MD5_CTX *md = (TSK_MD5_CTX *) ptr;
     if (md == NULL)
@@ -118,6 +118,7 @@ procFile(TskFsFile * fs_file, const char *path)
         }
 #endif
 #if DO_HASHLOOKUP
+        // This code is not currently viable; TskHdbInfo implementation is incomplete.
         {
             int retval;
             retval = tsk_hdb_lookup_raw(hdb_info, (uint8_t *) hash, 16,
@@ -140,7 +141,7 @@ procFile(TskFsFile * fs_file, const char *path)
  * that is found.
  */
 static TSK_WALK_RET_ENUM
-dirAct(TskFsFile * fs_file, const char *path, void *ptr)
+dirAct(TskFsFile * fs_file, const char *path, void * /*ptr*/)
 {
 	fprintf(stdout,
                "file systems file name: %s\n", fs_file->getName()->getName());
@@ -208,7 +209,7 @@ procFs(TskImgInfo * img_info, TSK_OFF_T start)
  * each volume to find a file system.
  */
 static TSK_WALK_RET_ENUM
-vsAct(TskVsInfo * vs_info, const TskVsPartInfo * vs_part, void *ptr)
+vsAct(TskVsInfo * vs_info, const TskVsPartInfo * vs_part, void * /*ptr*/)
 {
     if (procFs(const_cast<TskImgInfo *>(vs_info->getImgInfo()), const_cast<TskVsPartInfo *>(vs_part)->getStart() * vs_info->getBlockSize())) {
         // if we return ERROR here, then the walk will stop.  But, the 
@@ -291,6 +292,7 @@ main(int argc, char **argv1)
     }
 
 #if DO_HASHLOOKUP
+    // This code is not currently viable; TskHdbInfo implementation is incomplete.
     /* Setup hash infrastructure */
     if ((hdb_info =
             tsk_hdb_open(_TSK_T("/XXX/NSRLFile.txt"),
@@ -300,7 +302,7 @@ main(int argc, char **argv1)
         exit(1);
     }
 
-    if (tsk_hdb_hasindex(hdb_info, TSK_HDB_HTYPE_MD5_ID) == 0) {
+    if (tsk_hdb_idxsetup(hdb_info, TSK_HDB_HTYPE_MD5_ID) == 0) {
         delete img_info;
         fprintf(stderr,
             "Hash database does not have an index (create one using hfind -i nsrl-md5 HASHFILE\n");

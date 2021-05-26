@@ -9,7 +9,7 @@
  **
  */
 
-#include "tsk3/tsk_tools_i.h"
+#include "tsk/tsk_tools_i.h"
 #include <locale.h>
 #include <sys/stat.h>
 #include <errno.h>
@@ -21,7 +21,7 @@ usage()
 {
     TFPRINTF(stderr,
         _TSK_T
-        ("usage: %s [-vVae] [-f fstype] [-i imgtype] [-b dev_sector_size] [-o sector_offset] [-d dir_inum] image [image] output_dir\n"),
+        ("usage: %s [-vVae] [-f fstype] [-i imgtype] [-b dev_sector_size] [-o sector_offset] [-P pooltype] [-B pool_volume_block] [-d dir_inum] image [image] output_dir\n"),
         progname);
     tsk_fprintf(stderr,
         "\t-i imgtype: The format of the image file (use '-i list' for supported types)\n");
@@ -36,6 +36,10 @@ usage()
         "\t-e: Recover all files (allocated and unallocated)\n");
     tsk_fprintf(stderr,
         "\t-o sector_offset: sector offset for a volume to recover (recovers only that volume)\n");
+    tsk_fprintf(stderr,
+        "\t-P pooltype: Pool container type (use '-P list' for supported types)\n");
+    tsk_fprintf(stderr,
+        "\t-B pool_volume_block: Starting block (for pool volumes only)\n");
     tsk_fprintf(stderr, 
         "\t-d dir_inum: Directory inum to recover from (must also specify a specific partition using -o or there must not be a volume system)\n");
 
@@ -50,11 +54,12 @@ usage()
 
 class TskRecover:public TskAuto {
 public:
-    TskRecover(TSK_TCHAR * a_base_dir);
+    explicit TskRecover(TSK_TCHAR * a_base_dir);
     virtual TSK_RETVAL_ENUM processFile(TSK_FS_FILE * fs_file, const char *path);
     virtual TSK_FILTER_ENUM filterVol(const TSK_VS_PART_INFO * vs_part);
     virtual TSK_FILTER_ENUM filterFs(TSK_FS_INFO * fs_info);
-    uint8_t findFiles(TSK_OFF_T soffset, TSK_FS_TYPE_ENUM a_ftype, TSK_INUM_T a_dirInum);
+    uint8_t openFs(TSK_OFF_T a_soffset, TSK_FS_TYPE_ENUM fstype, TSK_POOL_TYPE_ENUM pooltype, TSK_DADDR_T pvol_block);
+    uint8_t findFiles(TSK_INUM_T a_dirInum);
     uint8_t handleError();
     
 private:
@@ -63,6 +68,7 @@ private:
     char m_vsName[FILENAME_MAX];
     bool m_writeVolumeDir;
     int m_fileCount;
+    TSK_FS_INFO * m_fs_info;
 };
 
 
@@ -89,13 +95,14 @@ uint8_t TskRecover::handleError()
  * Callback used to walk file content and write the results to the recovery file.
  */
 static TSK_WALK_RET_ENUM
-file_walk_cb(TSK_FS_FILE * a_fs_file, TSK_OFF_T a_off, TSK_DADDR_T a_addr,
-    char *a_buf, size_t a_len, TSK_FS_BLOCK_FLAG_ENUM a_flags, void *a_ptr)
+file_walk_cb(TSK_FS_FILE * a_fs_file, TSK_OFF_T a_off,
+    TSK_DADDR_T a_addr, char *a_buf, size_t a_len,
+    TSK_FS_BLOCK_FLAG_ENUM a_flags, void *a_ptr)
 {
     //write to the file
 #ifdef TSK_WIN32
     DWORD written = 0;
-    if (!WriteFile((HANDLE) a_ptr, a_buf, a_len, &written, NULL)) {
+    if (!WriteFile((HANDLE) a_ptr, a_buf, (DWORD)a_len, &written, NULL)) {
         fprintf(stderr, "Error writing file content\n");
         return TSK_WALK_ERROR;
     }
@@ -149,7 +156,9 @@ uint8_t TskRecover::writeFile(TSK_FS_FILE * a_fs_file, const char *a_path)
     *utf16 = '\0';
 
     //combine the target directory with volume name and path
-    wchar_t path16full[FILENAME_MAX];
+    //wchar_t path16full[FILENAME_MAX];
+	wchar_t path16full[FILENAME_MAX+1];
+	path16full[FILENAME_MAX] = L'\0'; // Try this
     wcsncpy(path16full, (wchar_t *) m_base_dir, FILENAME_MAX);
     wcsncat(path16full, L"\\", FILENAME_MAX-wcslen(path16full));
     wcsncat(path16full, path16, FILENAME_MAX-wcslen(path16full));
@@ -170,7 +179,7 @@ uint8_t TskRecover::writeFile(TSK_FS_FILE * a_fs_file, const char *a_path)
             }
             BOOL
                 result = CreateDirectoryW((LPCTSTR) path16full, NULL);
-            if (!result) {
+            if (result == FALSE) {
                 if (GetLastError() == ERROR_PATH_NOT_FOUND) {
                     fprintf(stderr, "Error Creating Directory (%S)", path16full);
                     return 1;
@@ -320,13 +329,13 @@ uint8_t TskRecover::writeFile(TSK_FS_FILE * a_fs_file, const char *a_path)
 TSK_RETVAL_ENUM TskRecover::processFile(TSK_FS_FILE * fs_file, const char *path)
 {
     // skip a bunch of the files that we don't want to write
-    if (isDotDir(fs_file, path))
+    if (isDotDir(fs_file))
         return TSK_OK;
     else if (isDir(fs_file))
         return TSK_OK;
     else if ((isNtfsSystemFiles(fs_file, path)) || (isFATSystemFiles(fs_file)))
         return TSK_OK;
-    else if ((!fs_file->meta) || (fs_file->meta->size == 0))
+    else if ((fs_file->meta == NULL) || (fs_file->meta->size == 0))
         return TSK_OK;
 
     writeFile(fs_file, path);
@@ -335,7 +344,7 @@ TSK_RETVAL_ENUM TskRecover::processFile(TSK_FS_FILE * fs_file, const char *path)
 
 
 TSK_FILTER_ENUM
-TskRecover::filterVol(const TSK_VS_PART_INFO * vs_part)
+TskRecover::filterVol(const TSK_VS_PART_INFO * /*vs_part*/)
 {
     /* Set the flag to show that we have a volume system so that we
      * make a volume directory. */
@@ -348,7 +357,7 @@ TskRecover::filterFs(TSK_FS_INFO * fs_info)
 {
     // make a volume directory if we analyzing a volume system
     if (m_writeVolumeDir) {
-        snprintf(m_vsName, FILENAME_MAX, "vol_%" PRIuOFF "/",
+        snprintf(m_vsName, FILENAME_MAX, "vol_%" PRIdOFF "/",
             fs_info->offset / m_img_info->sector_size);
     }
 
@@ -356,13 +365,45 @@ TskRecover::filterFs(TSK_FS_INFO * fs_info)
 }
 
 uint8_t
-TskRecover::findFiles(TSK_OFF_T a_soffset, TSK_FS_TYPE_ENUM a_ftype, TSK_INUM_T a_dirInum)
+TskRecover::openFs(TSK_OFF_T a_soffset, TSK_FS_TYPE_ENUM fstype, TSK_POOL_TYPE_ENUM pooltype, TSK_DADDR_T pvol_block)
+{
+    if (pvol_block == 0) {
+        if ((m_fs_info = tsk_fs_open_img_decrypt(m_img_info, a_soffset * m_img_info->sector_size,
+            fstype, "")) == NULL) {
+            tsk_error_print(stderr);
+            if (tsk_error_get_errno() == TSK_ERR_FS_UNSUPTYPE)
+                tsk_fs_type_print(stderr);
+            return TSK_ERR;
+        }
+    }
+    else {
+        const TSK_POOL_INFO *pool = tsk_pool_open_img_sing(m_img_info, a_soffset * m_img_info->sector_size, pooltype);
+        if (pool == NULL) {
+            tsk_error_print(stderr);
+            if (tsk_error_get_errno() == TSK_ERR_FS_UNSUPTYPE)
+                tsk_pool_type_print(stderr);
+            return TSK_ERR;
+        }
+
+        m_img_info = pool->get_img_info(pool, pvol_block);
+        if ((m_fs_info = tsk_fs_open_img_decrypt(m_img_info, a_soffset * m_img_info->sector_size, fstype, "")) == NULL) {
+            tsk_error_print(stderr);
+            if (tsk_error_get_errno() == TSK_ERR_FS_UNSUPTYPE)
+                tsk_fs_type_print(stderr);
+            return TSK_ERR;
+        }
+    }
+    return TSK_OK;
+}
+
+uint8_t
+TskRecover::findFiles(TSK_INUM_T a_dirInum)
 {
     uint8_t retval;
     if (a_dirInum)
-        retval = findFilesInFs(a_soffset * m_img_info->sector_size, a_ftype, a_dirInum);
+        retval = findFilesInFs(m_fs_info, a_dirInum);
     else
-        retval = findFilesInFs(a_soffset * m_img_info->sector_size, a_ftype);
+        retval = findFilesInFs(m_fs_info);
 
     printf("Files Recovered: %d\n", m_fileCount);
     return retval;
@@ -373,6 +414,8 @@ main(int argc, char **argv1)
 {
     TSK_IMG_TYPE_ENUM imgtype = TSK_IMG_TYPE_DETECT;
     TSK_FS_TYPE_ENUM fstype = TSK_FS_TYPE_DETECT;
+    TSK_POOL_TYPE_ENUM pooltype = TSK_POOL_TYPE_DETECT;
+    TSK_OFF_T pvol_block = 0;
     int ch;
     TSK_TCHAR **argv;
     unsigned int ssize = 0;
@@ -395,7 +438,7 @@ main(int argc, char **argv1)
     progname = argv[0];
     setlocale(LC_ALL, "");
 
-    while ((ch = GETOPT(argc, argv, _TSK_T("ab:d:ef:i:o:vV"))) > 0) {
+    while ((ch = GETOPT(argc, argv, _TSK_T("ab:B:d:ef:i:o:P:vV"))) > 0) {
         switch (ch) {
         case _TSK_T('?'):
         default:
@@ -467,6 +510,26 @@ main(int argc, char **argv1)
             }
             break;
 
+        case _TSK_T('P'):
+            if (TSTRCMP(OPTARG, _TSK_T("list")) == 0) {
+                tsk_pool_type_print(stderr);
+                exit(1);
+            }
+            pooltype = tsk_pool_type_toid(OPTARG);
+            if (pooltype == TSK_POOL_TYPE_UNSUPP) {
+                TFPRINTF(stderr,
+                    _TSK_T("Unsupported pool container type: %s\n"), OPTARG);
+                usage();
+            }
+            break;
+
+        case _TSK_T('B'):
+            if ((pvol_block = tsk_parse_offset(OPTARG)) == -1) {
+                tsk_error_print(stderr);
+                exit(1);
+            }
+            break;
+
         case _TSK_T('v'):
             tsk_verbose++;
             break;
@@ -492,8 +555,13 @@ main(int argc, char **argv1)
         tsk_error_print(stderr);
         exit(1);
     }
+    
+    if (tskRecover.openFs(soffset, fstype, pooltype, (TSK_DADDR_T)pvol_block)) {
+        // Errors were already logged
+        exit(1);
+    }
 
-    if (tskRecover.findFiles(soffset, fstype, dirInum)) {
+    if (tskRecover.findFiles(dirInum)) {
         // errors were already logged
         exit(1);
     }

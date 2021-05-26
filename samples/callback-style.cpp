@@ -38,7 +38,7 @@
 #include <string.h>
 #include <stdlib.h>
 
-#include <tsk3/libtsk.h>
+#include <tsk/libtsk.h>
 
 static TSK_HDB_INFO *hdb_info;
 
@@ -50,8 +50,8 @@ static TSK_HDB_INFO *hdb_info;
  * dent_walk callback function 
  */
 static TSK_WALK_RET_ENUM
-file_act(TSK_FS_FILE * fs_file, TSK_OFF_T a_off, TSK_DADDR_T addr,
-    char *buf, size_t size, TSK_FS_BLOCK_FLAG_ENUM flags, void *ptr)
+file_act(TSK_FS_FILE * /*fs_file*/, TSK_OFF_T /*a_off*/, TSK_DADDR_T /*addr*/,
+    char *buf, size_t size, TSK_FS_BLOCK_FLAG_ENUM /*flags*/, void *ptr)
 {
     TSK_MD5_CTX *md = (TSK_MD5_CTX *) ptr;
     if (md == NULL)
@@ -140,7 +140,7 @@ proc_file(TSK_FS_FILE * fs_file, const char *path)
  * that is found.
  */
 static TSK_WALK_RET_ENUM
-dir_act(TSK_FS_FILE * fs_file, const char *path, void *ptr)
+dir_act(TSK_FS_FILE * fs_file, const char *path, void * /*ptr*/)
 {
 	fprintf(stdout,
 		"file systems file name: %s\n", fs_file->name->name);
@@ -207,7 +207,7 @@ proc_fs(TSK_IMG_INFO * img_info, TSK_OFF_T start)
  * each volume to find a file system.
  */
 static TSK_WALK_RET_ENUM
-vs_act(TSK_VS_INFO * vs_info, const TSK_VS_PART_INFO * vs_part, void *ptr)
+vs_act(TSK_VS_INFO * vs_info, const TSK_VS_PART_INFO * vs_part, void * /*ptr*/)
 {
     if (proc_fs(vs_info->img_info, vs_part->start * vs_info->block_size)) {
         // if we return ERROR here, then the walk will stop.  But, the 
@@ -296,7 +296,7 @@ main(int argc, char **argv1)
         exit(1);
     }
 
-    if (tsk_hdb_hasindex(hdb_info, TSK_HDB_HTYPE_MD5_ID) == 0) {
+    if (tsk_hdb_open_idx(hdb_info, TSK_HDB_HTYPE_MD5_ID) == 0) {
         fprintf(stderr,
             "Hash database does not have an index (create one using hfind -i nsrl-md5 HASHFILE\n");
         exit(1);

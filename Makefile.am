@@ -1,44 +1,32 @@
 # File that we want to include in the dist
-EXTRA_DIST = README_win32.txt README.txt INSTALL.txt ChangeLog.txt NEWS.txt \
-    licenses/GNU-COPYING licenses/IBM-LICENSE licenses/cpl1.0.txt \
+EXTRA_DIST = README_win32.txt README.md INSTALL.txt ChangeLog.txt NEWS.txt API-CHANGES.txt \
+    licenses/GNU-COPYING licenses/IBM-LICENSE \
+    licenses/cpl1.0.txt licenses/bsd.txt licenses/mit.txt \
     m4/*.m4 \
     docs/README.txt \
     packages/sleuthkit.spec \
     win32/BUILDING.txt \
-    win32/NOTES.txt \
-    win32/*/*.vcproj \
+    win32/*/*.vcxproj \
     win32/tsk-win.sln \
+    win32/NugetPackages.props \
     win32/docs/* \
     bindings/java/README.txt \
     bindings/java/*.xml \
-    bindings/java/doxygen/* \
+    bindings/java/doxygen/Doxyfile \
+    bindings/java/doxygen/*.dox \
+    bindings/java/doxygen/*.html \
     bindings/java/nbproject/project.xml \
     bindings/java/src/org/sleuthkit/datamodel/*.java \
     bindings/java/src/org/sleuthkit/datamodel/*.html \
+    bindings/java/src/org/sleuthkit/datamodel/*.properties \
+    bindings/java/src/org/sleuthkit/datamodel/blackboardutils/*.java \
+    bindings/java/src/org/sleuthkit/datamodel/blackboardutils/attributes/*.java \
+    bindings/java/src/org/sleuthkit/datamodel/Examples/*.java \
     bindings/java/src/*.html \
-    bindings/java/test \
-    bindings/java/teststandards \
-    framework/*.txt \
-    framework/*.h \
-    framework/Extraction/*.cpp \
-    framework/Extraction/*.h \
-    framework/File/*.cpp \
-    framework/File/*.h \
-    framework/Pipeline/*.cpp \
-    framework/Pipeline/*.h \
-    framework/SampleConfig/*.xml \
-    framework/Services/*.cpp \
-    framework/Services/*.h \
-    framework/TskModules/* \
-    framework/Utilities/*.cpp \
-    framework/Utilities/*.h \
-    framework/docs/* \
-    framework/man/* \
-    framework/tsk_analyzeimg/*.cpp \
-    framework/tsk_validatepipeline/*.cpp \
-    framework/win32/*/*.vcproj \
-    framework/win32/*/*.sln \
-    framework/win32/Makefile
+    case-uco/java/*.xml \
+    case-uco/java/nbproject/*.xml \
+    case-uco/java/nbproject/*.properties \
+    case-uco/java/src/org/sleuthkit/caseuco/*.java
 
 ACLOCAL_AMFLAGS = -I m4
 
@@ -46,28 +34,40 @@ ACLOCAL_AMFLAGS = -I m4
 if CPPUNIT
   UNIT_TESTS=unit_tests
 endif
+
+# Compile java bindings if all of the dependencies existed
 if X_JNI
-  JNI=bindings/java/jni
+  JAVA_BINDINGS=bindings/java
+  JAVA_CASEUCO=case-uco/java
+else   
+  JAVA_BINDINGS=
+  JAVA_CASEUCO=
 endif
-SUBDIRS = tsk3 tools tests samples man $(UNIT_TESTS) $(JNI)
 
-nobase_include_HEADERS = tsk3/libtsk.h tsk3/tsk_incs.h \
-    tsk3/base/tsk_base.h tsk3/base/tsk_os.h \
-    tsk3/img/tsk_img.h tsk3/vs/tsk_vs.h \
-    tsk3/vs/tsk_bsd.h tsk3/vs/tsk_dos.h tsk3/vs/tsk_gpt.h \
-    tsk3/vs/tsk_mac.h tsk3/vs/tsk_sun.h \
-    tsk3/fs/tsk_fs.h tsk3/fs/tsk_ffs.h tsk3/fs/tsk_ext2fs.h tsk3/fs/tsk_fatfs.h \
-    tsk3/fs/tsk_ntfs.h tsk3/fs/tsk_iso9660.h tsk3/fs/tsk_hfs.h \
-    tsk3/hashdb/tsk_hashdb.h tsk3/auto/tsk_auto.h
+SUBDIRS = tsk tools tests samples man $(UNIT_TESTS) $(JAVA_BINDINGS) $(JAVA_CASEUCO)
 
-nobase_dist_data_DATA = tsk3/sorter/default.sort tsk3/sorter/freebsd.sort \
-    tsk3/sorter/images.sort tsk3/sorter/linux.sort tsk3/sorter/openbsd.sort \
-    tsk3/sorter/solaris.sort tsk3/sorter/windows.sort 
+nobase_include_HEADERS = tsk/libtsk.h tsk/tsk_incs.h \
+    tsk/base/tsk_base.h tsk/base/tsk_os.h \
+    tsk/img/tsk_img.h tsk/vs/tsk_vs.h tsk/img/pool.hpp \
+    tsk/vs/tsk_bsd.h tsk/vs/tsk_dos.h tsk/vs/tsk_gpt.h \
+    tsk/vs/tsk_mac.h tsk/vs/tsk_sun.h \
+    tsk/fs/tsk_fs.h tsk/fs/tsk_ffs.h tsk/fs/tsk_ext2fs.h tsk/fs/tsk_fatfs.h \
+    tsk/fs/tsk_ntfs.h tsk/fs/tsk_iso9660.h tsk/fs/tsk_hfs.h tsk/fs/tsk_yaffs.h \
+    tsk/fs/tsk_apfs.h tsk/fs/tsk_apfs.hpp tsk/fs/apfs_fs.h tsk/fs/apfs_fs.hpp tsk/fs/apfs_compat.hpp \
+    tsk/fs/decmpfs.h tsk/fs/tsk_exfatfs.h tsk/fs/tsk_fatxxfs.h \
+    tsk/hashdb/tsk_hashdb.h tsk/auto/tsk_auto.h \
+    tsk/auto/tsk_is_image_supported.h tsk/auto/guid.h \
+    tsk/pool/tsk_pool.h tsk/pool/tsk_pool.hpp tsk/pool/tsk_apfs.h tsk/pool/tsk_apfs.hpp \
+	tsk/pool/pool_compat.hpp tsk/pool/apfs_pool_compat.hpp \
+    tsk/util/crypto.hpp tsk/util/lw_shared_ptr.hpp tsk/util/span.hpp
+
+nobase_dist_data_DATA = tsk/sorter/default.sort tsk/sorter/freebsd.sort \
+    tsk/sorter/images.sort tsk/sorter/linux.sort tsk/sorter/openbsd.sort \
+    tsk/sorter/solaris.sort tsk/sorter/windows.sort 
 
 api-docs:
-	doxygen tsk3/docs/Doxyfile
-	doxygen framework/docs/Doxyfile
-	doxygen bindings/java/doxygen/Doxyfile
+	doxygen tsk/docs/Doxyfile
+	cd bindings/java/doxygen; doxygen Doxyfile
 
 man-html:
 	cd man;build-html

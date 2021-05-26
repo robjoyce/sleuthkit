@@ -1,7 +1,7 @@
 /*
- * Autopsy Forensic Browser
+ * Sleuth Kit Data Model
  *
- * Copyright 2011-2013 Basis Technology Corp.
+ * Copyright 2011-2018 Basis Technology Corp.
  * Contact: carrier <at> sleuthkit <dot> org
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,38 +20,35 @@ package org.sleuthkit.datamodel;
 
 import java.io.IOException;
 import java.io.InputStream;
-import java.util.logging.Level;
-import java.util.logging.Logger;
 
 /**
  * InputStream to read bytes from a Content object's data
  */
-public class ReadContentInputStream extends InputStream {
+public final class ReadContentInputStream extends InputStream {
 
-	private long position;
-	private long length;
-	private Content content;
-	private static final Logger logger = Logger.getLogger(ReadContentInputStream.class.getName());
+	private long currentOffset;
+	private final long contentSize;
+	private final Content content;
 
 	public ReadContentInputStream(Content content) {
 		this.content = content;
-		this.position = 0;
-		this.length = content.getSize();
+		this.currentOffset = 0;
+		this.contentSize = content.getSize();
 	}
 
 	@Override
-	public int read() throws IOException {
+	public int read() throws ReadContentInputStreamException {
 		byte[] buff = new byte[1];
 		return (read(buff) != -1) ? buff[0] : -1;
 	}
 
 	@Override
-	public int read(byte[] b) throws IOException {
+	public int read(byte[] b) throws ReadContentInputStreamException {
 		return read(b, 0, b.length);
 	}
 
 	@Override
-	public int read(byte[] b, int off, int len) throws IOException {
+	public int read(byte[] b, int off, int len) throws ReadContentInputStreamException {
 
 		final int buffLen = b.length;
 		//must return 0 for zero-length arrays
@@ -60,25 +57,27 @@ public class ReadContentInputStream extends InputStream {
 		}
 
 		//would get an error from TSK if we try to read an empty file
-		if (length == 0) {
+		if (contentSize == 0) {
 			return -1;
 		}
 
-		//check args more
+		// check off.  Must be in bounds of buffer
 		if (off < 0 || off >= buffLen) {
 			return -1;
 		}
 
-		if (position >= length) {
-			//eof, no data remains to be read
+		//eof, no data remains to be read
+		if (currentOffset >= contentSize) {
 			return -1;
 		}
 
-		//read into the user buffer
-		int lenToRead = (int) Math.min(length - position, buffLen - off);
-		lenToRead = Math.min(lenToRead, len);
+		// Is the file big enough for the full request?
+		int lenToRead = (int) Math.min(contentSize - currentOffset, len);
 
-		byte[] retBuf = null;
+		// is the buffer big enough?
+		lenToRead = Math.min(lenToRead, buffLen - off);
+
+		byte[] retBuf;
 		if (off == 0) {
 			//write directly to user buffer
 			retBuf = b;
@@ -87,13 +86,13 @@ public class ReadContentInputStream extends InputStream {
 			retBuf = new byte[lenToRead];
 		}
 		try {
-			final int lenRead = content.read(retBuf, position, lenToRead);
+			final int lenRead = content.read(retBuf, currentOffset, lenToRead);
 
 			if (lenRead == 0 || lenRead == -1) {
 				//error or no more bytes to read, report EOF
 				return -1;
 			} else {
-				position += lenRead;
+				currentOffset += lenRead;
 
 				//if read into user-specified offset, copy back from temp buffer to user
 				if (off != 0) {
@@ -103,35 +102,33 @@ public class ReadContentInputStream extends InputStream {
 				return lenRead;
 			}
 		} catch (TskCoreException ex) {
-			logger.log(Level.WARNING, ("Error reading content into stream: "
-					+ content.getId()) + ": " + content.getName()
-					+ ", at offset " + position + ", length to read: " + lenToRead, ex);
-			throw new IOException(ex);
+			throw new ReadContentInputStreamException(String.format("Error reading file '%s' (id=%d) at offset %d.", content.getName(), content.getId(), currentOffset), ex);
 		}
 
 	}
-	
+
 	@Override
 	public int available() throws IOException {
-		if (position > length) {
+		long len = contentSize - currentOffset;
+		if (len < 0) {
 			return 0;
 		}
-        return (int)(length - position);
-    }
+		return (int) len;
+	}
 
 	@Override
 	public long skip(long n) throws IOException {
 		//more efficient skip() implementation than superclass
 		//as it does not involve reads
-		long toSkip = Math.min(n, length - position);  //allow to skip to EOF
-		position += toSkip;
+		long toSkip = Math.min(n, contentSize - currentOffset);  //allow to skip to EOF
+		currentOffset += toSkip;
 		return toSkip;
 		//0 1 2 3 4 5      len: 6
 	}
 
 	@Override
 	public void close() throws IOException {
-		super.close(); 
+		super.close();
 		//nothing to be done currently, file handles are closed when content is gc'ed
 	}
 
@@ -139,39 +136,58 @@ public class ReadContentInputStream extends InputStream {
 	public boolean markSupported() {
 		return false;
 	}
-	
+
 	/// additional methods to facilitate stream seeking
-	
 	/**
 	 * Get total length of the stream
+	 *
 	 * @return number of bytes that can be read from this stream
 	 */
 	public long getLength() {
-		return length;
+		return contentSize;
 	}
-	
+
 	/**
 	 * Get current position in the stream
+	 *
 	 * @return current offset in bytes
 	 */
 	public long getCurPosition() {
-		return position;
+		return currentOffset;
 	}
-	
+
 	/**
 	 * Set new current position in the stream, up to and including EOF
+	 *
 	 * @param newPosition new position in the stream to be set
-	 * @return the actual position set, which can be less than position passed in
-	 * if EOF has been reached
+	 *
+	 * @return the actual position set, which can be less than position passed
+	 *         in if EOF has been reached
 	 */
 	public long seek(long newPosition) {
 		if (newPosition < 0) {
-			throw new IllegalArgumentException ("Illegal negative new position in the stream");
+			throw new IllegalArgumentException("Illegal negative new position in the stream");
 		}
-		
-		position = Math.min(newPosition, length);
-		return position;
-		
+
+		currentOffset = Math.min(newPosition, contentSize);
+		return currentOffset;
+
 	}
-	
+
+	/**
+	 * Exception thrown when there's an error reading from the
+	 * ReadContentInputStream.
+	 */
+	public final static class ReadContentInputStreamException extends IOException {
+
+		private static final long serialVersionUID = 1L;
+
+		public ReadContentInputStreamException(String message) {
+			super(message);
+		}
+
+		public ReadContentInputStreamException(String message, Throwable cause) {
+			super(message, cause);
+		}
+	}
 }

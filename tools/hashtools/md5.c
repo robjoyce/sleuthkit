@@ -24,7 +24,7 @@
 *--*/
 
 #include <stdio.h>
-#include "tsk3/libtsk.h"
+#include "tsk/libtsk.h"
 
 #define MD5_HASH_LENGTH	16
 
@@ -35,13 +35,13 @@ main(argc, argv)
 {
     char *myname = argv[0];
     char *crunch();
-    FILE *fp;
 
     if (argc < 2) {
         printf("%s\n", crunch(stdin));
     }
     else {
         while (--argc && *++argv) {
+            FILE *fp;
             if ((fp = fopen(*argv, "r")) == 0) {
                 fprintf(stderr, "%s: ", myname);
                 perror(*argv);

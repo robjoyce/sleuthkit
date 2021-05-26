@@ -11,7 +11,7 @@
 
 /* Test and compare the file attribute list apis */
 
-#include "tsk3/tsk_tools_i.h"
+#include "tsk/tsk_tools_i.h"
 
 static char *s_root;
 
@@ -118,8 +118,8 @@ test_get_apis(TSK_FS_INFO * a_fs, TSK_INUM_T a_addr, int a_len)
 
         if (fs_attr != fs_attr2) {
             fprintf(stderr,
-                "Attribute from get_type not same addr as original %lu vs %lu from %"
-                PRIuINUM "\n", (long) fs_attr, (long) fs_attr2, a_addr);
+                "Attribute from get_type not same addr as original %p vs %p from %"
+                PRIuINUM "\n", fs_attr, fs_attr2, a_addr);
             tsk_error_print(stderr);
             return 1;
         }
@@ -314,10 +314,12 @@ main(int argc, char **argv)
     }
     s_root = argv[1];
 
-    if (test_fat12())
+    if (test_fat12()) {
         return 1;
-    if (test_ntfs_fe())
+    }
+    else if (test_ntfs_fe()) {
         return 1;
+    }
 
     printf("Tests Passed\n");
     return 0;

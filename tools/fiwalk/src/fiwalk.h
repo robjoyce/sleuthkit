@@ -112,12 +112,12 @@ extern bool	opt_md5;			// do we need md5s?
 extern bool	opt_sha1;			// do we need sha1s?
 extern string	save_outdir;
 extern bool	opt_get_fragments;
-//extern bool	opt_compute_sector_hashes;
 extern int	opt_debug;
 extern bool	opt_no_data;
 extern bool	opt_allocated_only;
 extern bool	opt_body_file;
 extern bool	opt_ignore_ntfs_system_files;
+extern bool     opt_sector_hash;
 extern int	current_partition_num;
 extern int64_t	current_partition_start;
 extern const char *config_file;
@@ -140,8 +140,6 @@ void file_infot(const string name,time_t t0);
 void file_infot(const string name,time_t t0, TSK_FS_TYPE_ENUM ftype);
 
 extern u_int sectorhash_size;		// for the computation of sector hashes
-//extern bool  opt_compute_sector_hashes;
-//extern bool  opt_print_sector_hashes;
 extern namelist_t namelist;		// names of files that we want to find
 
 
@@ -154,13 +152,14 @@ extern FILE  *t;				// text output or body file enabled
 void partition_info(const string &name,const string &value,const string &attribute);
 void partition_info(const string &name,const string &value);
 void partition_info(const string &name,long i);
+void partition_info(const string &name, const struct timeval &ts);
 
 
 
 /* fiwalk_tsk.cpp */
 int process_image_file(int argc,char *const *argv,const char *audit_file,u_int sector_size);
 
-#ifdef TSK_WIN32
+#ifdef _MSC_VER
 #define F_OK 00
 #define W_OK 02
 #define R_OK 04

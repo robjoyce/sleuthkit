@@ -1,7 +1,7 @@
 /*
  * Sleuth Kit Data Model
  *
- * Copyright 2011 Basis Technology Corp.
+ * Copyright 2011-2018 Basis Technology Corp.
  * Contact: carrier <at> sleuthkit <dot> org
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,315 +18,693 @@
  */
 package org.sleuthkit.datamodel;
 
+import java.io.BufferedReader;
+import java.io.FileReader;
+import java.io.IOException;
 import java.text.DateFormat;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.GregorianCalendar;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TimeZone;
+import java.util.UUID;
+import java.util.concurrent.locks.ReadWriteLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+import org.apache.commons.lang3.StringUtils;
 import org.sleuthkit.datamodel.TskData.TSK_FS_ATTR_TYPE_ENUM;
+import org.sleuthkit.datamodel.SleuthkitCase.CaseDbTransaction;
 
 /**
- * Interfaces with the Sleuthkit TSK c/c++ libraries Supports case management,
- * add image process, reading data off content objects Setting up Hash database
- * parameters and updating / reading values
+ * A utility class that provides a interface to the SleuthKit via JNI. Supports
+ * case management, add image process, reading data off content objects Setting
+ * up Hash database parameters and updating / reading values
  *
  * Caches image and filesystem handles and reuses them for the duration of the
  * application
  */
 public class SleuthkitJNI {
 
-	private static final int MAX_DATABASES = 256;
+	private static final Logger logger = Logger.getLogger(SleuthkitJNI.class.getName());
+	
+	/**
+	 * Lock to protect against the TSK data structures being closed while
+	 * another thread is in the C++ code. Do not use this lock after obtaining
+	 * HandleCache.cacheLock. Additionally, the only code that should acquire
+	 * the write lock is CaseDbHandle.free().
+	 */
+	private static final ReadWriteLock tskLock = new ReentrantReadWriteLock();
 
-	//Native methods
-	private static native String getVersionNat();
-
-	private static native void startVerboseLoggingNat(String logPath);
-
-	//database
-	private static native long newCaseDbNat(String dbPath) throws TskCoreException;
-
-	private static native long openCaseDbNat(String path) throws TskCoreException;
-
-	private static native void closeCaseDbNat(long db) throws TskCoreException;
-
-	private static native int setDbNSRLNat(String hashDbPath) throws TskCoreException;
-
-	private static native int addDbKnownBadNat(String hashDbPath) throws TskCoreException;
-
-	private static native String getDbName(String hashDbPath) throws TskCoreException;
-
-	private static native void closeDbLookupsNat() throws TskCoreException;
-
-	private static native int knownBadDbLookup(String hash, int dbHandle) throws TskCoreException;
-
-	private static native int nsrlDbLookup(String hash) throws TskCoreException;
-
-	private static native int getIndexSizeNat(String hashDbPath) throws TskCoreException;
-
-	//load image
-	private static native long initAddImgNat(long db, String timezone, boolean processUnallocSpace, boolean noFatFsOrphans) throws TskCoreException;
-
-	private static native void runAddImgNat(long process, String[] imgPath, int splits, String timezone) throws TskCoreException, TskDataException; // if runAddImg finishes without being stopped, revertAddImg or commitAddImg MUST be called
-
-	private static native void stopAddImgNat(long process) throws TskCoreException;
-
-	private static native void revertAddImgNat(long process) throws TskCoreException;
-
-	private static native long commitAddImgNat(long process) throws TskCoreException;
-
-	//open functions
-	private static native long openImgNat(String[] imgPath, int splits) throws TskCoreException;
-
-	private static native long openVsNat(long imgHandle, long vsOffset) throws TskCoreException;
-
-	private static native long openVolNat(long vsHandle, long volId) throws TskCoreException;
-
-	private static native long openFsNat(long imgHandle, long fsId) throws TskCoreException;
-
-	private static native long openFileNat(long fsHandle, long fileId, int attrType, int attrId) throws TskCoreException;
-
-	//read functions
-	private static native int readImgNat(long imgHandle, byte[] readBuffer, long offset, long len) throws TskCoreException;
-
-	private static native int readVsNat(long vsHandle, byte[] readBuffer, long offset, long len) throws TskCoreException;
-
-	private static native int readVolNat(long volHandle, byte[] readBuffer, long offset, long len) throws TskCoreException;
-
-	private static native int readFsNat(long fsHandle, byte[] readBuffer, long offset, long len) throws TskCoreException;
-
-	private static native int readFileNat(long fileHandle, byte[] readBuffer, long offset, long len) throws TskCoreException;
-
-	//close functions
-	private static native void closeImgNat(long imgHandle);
-
-	private static native void closeVsNat(long vsHandle);
-
-	private static native void closeFsNat(long fsHandle);
-
-	private static native void closeFileNat(long fileHandle);
-
-	//hash-lookup database functions
-	private static native void createLookupIndexNat(String dbPath) throws TskCoreException;
-
-	private static native boolean lookupIndexExistsNat(String dbPath) throws TskCoreException;
-
-	//util functions
-	private static native long findDeviceSizeNat(String devicePath) throws TskCoreException;
-
-	private static native String getCurDirNat(long process);
-
-	//Linked library loading
+	/*
+	 * Loads the SleuthKit libraries.
+	 */
 	static {
-		try {
-			System.loadLibrary("zlib");
-		} catch (UnsatisfiedLinkError e) {
-			System.out.println("SleuthkitJNI: error loading zlib library, " + e.toString());
-		}
-		
-		try {
-			System.loadLibrary("libewf");
-		} catch (UnsatisfiedLinkError e) {
-			System.out.println("SleuthkitJNI: error loading libewf library, " + e.toString());
-		}
-
-		/* We should rename the Windows dll, to remove the lib prefix.
-		 * First try windows version of the name and then try Unix-style.
-		 */
-		try {
-			System.loadLibrary("libtsk_jni");
-		} catch (UnsatisfiedLinkError e1) {
-			try {
-				System.loadLibrary("tsk_jni");
-			} catch (UnsatisfiedLinkError e2) {
-				System.out.println("SleuthkitJNI: Error loading tsk_jni library " + e2.toString());
-			}
-		}
-	}
-
-	public SleuthkitJNI() {
+		LibraryUtils.loadSleuthkitJNI();
 	}
 
 	/**
-	 * Handle to TSK Case database
+	 * Constructor for the utility class that provides a interface to the
+	 * SleuthKit via JNI.
+	 */
+	private SleuthkitJNI() {
+	}
+
+	/**
+	 * Utility class to hold the handles for a single case.
+	 */
+	private static class CaseHandles {
+		/*
+		 * A SleuthKit image handle cache implemented as a mappng of
+		 * concatenated image file paths to image handles.
+		 */
+		private final Map<String, Long> imageHandleCache = new HashMap<>();
+
+		/*
+		 * A SleuthKit file system handles cache implemented as a mapping of
+		 * image handles to image offset and file system handle pairs.
+		 */
+		private final Map<Long, Map<Long, Long>> fsHandleCache = new HashMap<>();
+
+		/*
+		 * The collection of open file handles. We will only allow requests
+		 * through to the C code if the file handle exists in this collection.
+		 */
+		private final Set<Long> fileHandleCache = new HashSet<>();
+
+		private final Map<Long, List<Long>> fileSystemToFileHandles = new HashMap<>();
+		
+		private final Map<Long, Map<Long, Long>> poolHandleCache = new HashMap<>();
+		
+		// The poolImgCache is only used to close the images later.
+		private final List<Long> poolImgCache = new ArrayList<>();
+		
+		/*
+		 * Currently, our APFS code is not thread-safe and it is the only code
+		 * that uses pools. To prevent crashes, we make any reads to a file system
+		 * contained in a pool single-threaded. This cache keeps track of which
+		 * open file system handles are contained in a pool so we can set the locks
+		 * appropriately. 
+		 */
+		private final List<Long> poolFsList = new ArrayList<>();
+		
+		private CaseHandles() {
+			// Nothing to do here
+		}
+	}
+	
+	/**
+	 * Cache of all handles allocated in the JNI layer. Used for: (a) quick
+	 * lookup of frequently used handles (e.g. file system and image) (b)
+	 * ensuring all handles passed in by clients of SleuthkitJNI are valid. (c)
+	 * consistent cleanup of handles on closure.
+	 */
+	private static class HandleCache {
+
+		/*
+		 * A monitor used to guard access to cached Sleuthkit JNI handles.
+		 */
+		private static final Object cacheLock = new Object();
+
+		private static final Map<String, CaseHandles> caseHandlesCache = new HashMap<>();
+
+		private static final String INVALID_FILE_HANDLE = "Invalid file handle."; //NON-NLS
+		
+		/*
+		 * Currently, our APFS code is not thread-safe and it is the only code
+		 * that uses pools. To prevent crashes, we make any reads to a file system
+		 * contained in a pool single-threaded. This cache keeps track of which
+		 * open file handles are contained in a pool so we can set the locks
+		 * appropriately. 
+		 * 
+		 * Access to this list should be guarded by cacheLock.
+		 */
+		private static final List<Long> poolFileHandles = new ArrayList<>();
+		
+		/**
+		 * Create the empty cache for a new case
+		 * 
+		 * @param caseIdentifier Unique identifier for the case.
+		 */
+		private static void createCaseHandleCache(String caseIdentifier) {
+			caseHandlesCache.put(caseIdentifier, new CaseHandles());
+		}
+		
+		/**
+		 * If there is one case open return its unique identifier.
+		 * This is to support deprecated methods that don't have a case parameter.
+		 * 
+		 * @return the open case identifier
+		 * 
+		 * @throws TskCoreException If there are no cases open or if multiple cases are open
+		 */
+		private static String getDefaultCaseIdentifier() throws TskCoreException {
+			synchronized (cacheLock) {
+				if (caseHandlesCache.keySet().size() > 1) {
+					throw new TskCoreException("Can not get default case identifier with multiple open cases");
+				} else if (caseHandlesCache.keySet().isEmpty()) {
+					throw new TskCoreException("Can not get default case identifier with no open case");
+				}
+
+				return (caseHandlesCache.keySet().iterator().next());
+			}
+		}
+			
+		/**
+		 * Gets the case handle cache for a given case.
+		 * 
+		 * @param caseIdentifier Unique identifier for the case.
+		 * 
+		 * @return the case handle cache
+		 * 
+		 * @throws TskCoreException If there is no cache for this case.
+		 */
+		private static CaseHandles getCaseHandles(String caseIdentifier) throws TskCoreException {
+			synchronized (cacheLock) {
+				if (caseHandlesCache.containsKey(caseIdentifier)) {
+					return caseHandlesCache.get(caseIdentifier);
+				}
+				// If the CaseHandles object isn't in there, it should mean the case has been closed.
+				throw new TskCoreException("No entry for case " + caseIdentifier + " in cache. Case may have been closed");
+			}
+		}
+		
+		/**
+		 * Removes the case handle cache for a given case.
+		 * 
+		 * @param caseIdentifier Unique identifier for the case.
+		 */
+		private static void removeCaseHandlesCache(String caseIdentifier) {
+			synchronized (cacheLock) {
+				if (caseHandlesCache.containsKey(caseIdentifier)) {
+					caseHandlesCache.get(caseIdentifier).fsHandleCache.clear();
+					caseHandlesCache.get(caseIdentifier).imageHandleCache.clear();
+					caseHandlesCache.get(caseIdentifier).fileHandleCache.clear();
+					caseHandlesCache.get(caseIdentifier).fileSystemToFileHandles.clear();
+					caseHandlesCache.get(caseIdentifier).poolHandleCache.clear();
+					caseHandlesCache.remove(caseIdentifier);
+				}
+			}
+		}
+		
+		/**
+		 * Searches all the open caches for an image handle.
+		 * 
+		 * @param imgHandle
+		 * 
+		 * @return true if the handle is found in any cache, false otherwise
+		 */
+		private static boolean isImageInAnyCache(long imgHandle) {
+			synchronized (cacheLock) {
+				for (String caseIdentifier:caseHandlesCache.keySet()) {
+					if (caseHandlesCache.get(caseIdentifier).fsHandleCache.keySet().contains(imgHandle)) {
+						return true;
+					}
+				}
+				return false;
+			}
+		}
+		
+		/**
+		 * Add a new file handle to the cache.
+		 *
+		 * @param caseIdentifier Unique identifier for the case.
+		 * @param fileHandle The new file handle.
+		 * @param fsHandle   The file system handle in which the file lives.
+		 */
+		private static void addFileHandle(String caseIdentifier, long fileHandle, long fsHandle) {
+			try {
+				synchronized (cacheLock) {
+					// Add to collection of open file handles.
+					getCaseHandles(caseIdentifier).fileHandleCache.add(fileHandle);
+
+					// Add to map of file system to file handles.
+					if (getCaseHandles(caseIdentifier).fileSystemToFileHandles.containsKey(fsHandle)) {
+						getCaseHandles(caseIdentifier).fileSystemToFileHandles.get(fsHandle).add(fileHandle);
+					} else {
+						getCaseHandles(caseIdentifier).fileSystemToFileHandles.put(fsHandle, new ArrayList<>(Arrays.asList(fileHandle)));
+					}
+				}
+			} catch (TskCoreException ex) {
+				logger.log(Level.WARNING, "Error caching file handle for case {0}", caseIdentifier);
+			}
+		}
+
+		/**
+		 * Removes a file handle from the cache for the given case
+		 * 
+		 * @param fileHandle
+		 * @param skCase     Can be null. If so, the first matching handle will be removed.
+		 */
+		private static void removeFileHandle(long fileHandle, SleuthkitCase skCase) {
+			synchronized (cacheLock) {
+				// Remove from collection of open file handles.
+				if (skCase != null) {
+					try {
+						getCaseHandles(skCase.getCaseHandleIdentifier()).fileHandleCache.remove(fileHandle);
+					} catch (TskCoreException ex) {
+						// If the call to getCaseHandles() failed, we've already cleared the cache.
+					}
+				} else {
+					// If we don't know what case the handle is from, delete the first one we find
+					for (String caseIdentifier:caseHandlesCache.keySet()) {
+						if (caseHandlesCache.get(caseIdentifier).fileHandleCache.contains(fileHandle)) {
+							caseHandlesCache.get(caseIdentifier).fileHandleCache.remove(fileHandle);
+							return;
+						}
+					}
+				}
+			}
+		}
+
+		/**
+		 * Searches all the open caches for a file handle.
+		 * 
+		 * @param fileHandle
+		 * 
+		 * @return true if the handle is found in any cache, false otherwise
+		 */
+		private static boolean isValidFileHandle(long fileHandle) {
+			synchronized (cacheLock) {
+				for (String caseIdentifier:caseHandlesCache.keySet()) {
+					if (caseHandlesCache.get(caseIdentifier).fileHandleCache.contains(fileHandle)) {
+						return true;
+					}
+				}
+				return false;
+			}
+		}
+
+		private static void closeHandlesAndClearCache(String caseIdentifier) throws TskCoreException {
+			synchronized (cacheLock) {
+				/*
+				 * Close any cached file system handles.
+				 */
+				for (Map<Long, Long> imageToFsMap : getCaseHandles(caseIdentifier).fsHandleCache.values()) {
+					for (Long fsHandle : imageToFsMap.values()) {						
+						// First close all open file handles for the file system.
+						if (getCaseHandles(caseIdentifier).fileSystemToFileHandles.containsKey(fsHandle)) {
+							for (Long fileHandle : getCaseHandles(caseIdentifier).fileSystemToFileHandles.get(fsHandle)) {
+								// Update the cache of file handles contained in pools
+								if (poolFileHandles.contains(fileHandle)) {
+									poolFileHandles.remove(fileHandle);
+								}
+								closeFile(fileHandle);
+							}
+						}
+						// Then close the file system handle.
+						closeFsNat(fsHandle);
+					}
+				}
+				
+				/*
+				 * Clear out the list of pool file systems.
+				 */
+				getCaseHandles(caseIdentifier).poolFsList.clear();
+				
+				/*
+				 * Close any cached pools
+				 */
+				for (Long imgHandle : getCaseHandles(caseIdentifier).poolHandleCache.keySet()) {
+					for (Long poolHandle : getCaseHandles(caseIdentifier).poolHandleCache.get(imgHandle).values()) {
+						closePoolNat(poolHandle);
+					}
+				}
+				
+				/*
+				 * Close any open pool images
+				 */
+				for (Long imageHandle : getCaseHandles(caseIdentifier).poolImgCache) {
+					closeImgNat(imageHandle);
+				}
+
+				/*
+				 * Close any cached image handles.
+				 */
+				for (Long imageHandle : getCaseHandles(caseIdentifier).imageHandleCache.values()) {
+					closeImgNat(imageHandle);
+				}
+
+				removeCaseHandlesCache(caseIdentifier);
+			}
+
+		}
+	}
+
+	/**
+	 * Encapsulates a handle to a SleuthKit case database with support for
+	 * adding images to the database.
 	 */
 	public static class CaseDbHandle {
 
-		private long caseDbPointer;
-		//map concat. image paths to cached image handle
-		private static final Map<String, Long> imageHandleCache = new HashMap<String, Long>();
-		//map image and offsets to cached fs handle
-		private static final Map<Long, Map<Long, Long>> fsHandleCache = new HashMap<Long, Map<Long, Long>>();
+		/*
+		 * A unique indentifier for a case
+		 */
+		private final String caseDbIdentifier;
 
-		private CaseDbHandle(long pointer) {
-			this.caseDbPointer = pointer;
+		/**
+		 * Constructs an object that encapsulates a handle to a single user SleuthKit case
+		 * database with support for adding images to the database.
+		 *
+		 * @param databaseName A path to a case database
+		 */
+		private CaseDbHandle(String databaseName) {
+			this.caseDbIdentifier = "SingleUser:" + databaseName; // NON-NLS
+			HandleCache.createCaseHandleCache(caseDbIdentifier);
+		}
+		
+		/**
+		 * Constructs an object that encapsulates a handle to a multi user SleuthKit case
+		 * database with support for adding images to the database.
+		 *
+		 * @param databaseName The name of the multi-user database.
+		 * @param info  Connection info for the multi-user database.
+		 */
+		private CaseDbHandle(String databaseName, CaseDbConnectionInfo info) {
+			this.caseDbIdentifier = "MultiUser:" + info.getHost() + ":" + databaseName;
+			HandleCache.createCaseHandleCache(caseDbIdentifier);
+		}
+		
+		/**
+		 * Get the TSK pointer for the database
+		 * 
+		 * @return Unique identifier for the case.
+		 */
+		String getCaseDbIdentifier() {
+			return caseDbIdentifier;
 		}
 
 		/**
-		 * Close the case database
+		 * Closes the case database and any open image and file system handles.
 		 *
-		 * @throws TskCoreException exception thrown if critical error occurs
-		 * within TSK
+		 * @throws TskCoreException if there is a problem competing the
+		 *                          operation.
 		 */
 		void free() throws TskCoreException {
-			SleuthkitJNI.closeCaseDbNat(caseDbPointer);
+			tskLock.writeLock().lock();
+			try {
+				HandleCache.closeHandlesAndClearCache(caseDbIdentifier);
+				//SleuthkitJNI.closeCaseDbNat(caseDbIdentifier);
+			} finally {
+				tskLock.writeLock().unlock();
+			}
 		}
 
 		/**
-		 * Clear currently set lookup databases within TSK
+		 * Adds an image to the case database. For finer-grained control of the
+		 * process of adding the image, call CaseDbHandle.initAddImageProcess
+		 * instead.
 		 *
-		 * @throws TskCoreException exception thrown if critical error occurs
-		 * within TSK
+		 * @param deviceObjId      The object id of the device associated with
+		 *                         the image.
+		 * @param imageFilePaths   The image file paths.
+		 * @param timeZone         The time zone for the image.
+		 * @param addFileSystems   Pass true to attempt to add file systems
+		 *                         within the image to the case database.
+		 * @param addUnallocSpace  Pass true to create virtual files for
+		 *                         unallocated space. Ignored if addFileSystems
+		 *                         is false.
+		 * @param skipFatFsOrphans Pass true to skip processing of orphan files
+		 *                         for FAT file systems. Ignored if
+		 *                         addFileSystems is false.
+		 *
+		 * @return The object id of the image.
+		 *
+		 * @throws TskCoreException if there is an error adding the image to
+		 *                          case database.
 		 */
-		void clearLookupDatabases() throws TskCoreException {
-			closeDbLookupsNat();
+		long addImageInfo(long deviceObjId, List<String> imageFilePaths, String timeZone, SleuthkitCase skCase) throws TskCoreException {
+			TskCaseDbBridge dbHelper = new TskCaseDbBridge(skCase, new DefaultAddDataSourceCallbacks());
+			try {
+				long tskAutoDbPointer = initializeAddImgNat(dbHelper, timezoneLongToShort(timeZone), false, false, false);
+				runOpenAndAddImgNat(tskAutoDbPointer, UUID.randomUUID().toString(), imageFilePaths.toArray(new String[0]), imageFilePaths.size(), timeZone);				
+				long id = finishAddImgNat(tskAutoDbPointer);
+				dbHelper.finish();
+				skCase.addDataSourceToHasChildrenMap();
+				return id;
+			} catch (TskDataException ex) {
+				throw new TskCoreException("Error adding image to case database", ex);
+			}
 		}
 
 		/**
-		 * Set the NSRL database
+		 * Initializes a multi-step process for adding an image to the case
+		 * database.
 		 *
-		 * @param path The path to the database
-		 * @return a handle for that database
+		 * @param timeZone         The time zone of the image.
+		 * @param addUnallocSpace  Pass true to create virtual files for
+		 *                         unallocated space.
+		 * @param skipFatFsOrphans Pass true to skip processing of orphan files
+		 *                         for FAT file systems.
+		 * @param imageCopyPath    Path to which a copy of the image should be
+		 *                         written. Use the empty string to disable
+		 *                         image writing.
+		 *
+		 * @return An object that can be used to exercise fine-grained control
+		 *         of the process of adding the image to the case database.
 		 */
-		int setNSRLDatabase(String path) throws TskCoreException {
-			return setDbNSRLNat(path);
+		AddImageProcess initAddImageProcess(String timeZone, boolean addUnallocSpace, boolean skipFatFsOrphans, String imageCopyPath, SleuthkitCase skCase) {
+			return new AddImageProcess(timeZone, addUnallocSpace, skipFatFsOrphans, imageCopyPath, skCase);
 		}
 
 		/**
-		 * Add the known bad database
-		 *
-		 * @param path The path to the database
-		 * @return a handle for that database
-		 */
-		int addKnownBadDatabase(String path) throws TskCoreException {
-			return addDbKnownBadNat(path);
-		}
-
-		/**
-		 * Start the process of adding a disk image to the case
-		 *
-		 * @param timezone Timezone that image was from
-		 * @param processUnallocSpace true if to process unallocated space in
-		 * the image
-		 * @param noFatFsOrphans true if to skip processing of orphans on FAT
-		 * filesystems
-		 *
-		 * @return Object that can be used to manage the process.
-		 */
-		AddImageProcess initAddImageProcess(String timezone, boolean processUnallocSpace, boolean noFatFsOrphans) {
-			return new AddImageProcess(timezone, processUnallocSpace, noFatFsOrphans);
-		}
-
-		/**
-		 * Encapsulates a multi-step process to add a disk image. Adding a disk
-		 * image takes a while and this object has objects to manage that
-		 * process. Methods within this class are intended to be threadsafe.
+		 * Encapsulates a multi-step process to add an image to the case
+		 * database.
 		 */
 		public class AddImageProcess {
 
-			private String timezone;
-			private boolean processUnallocSpace;
-			private boolean noFatFsOrphans;
-			private volatile long autoDbPointer;
+			private final String timeZone;
+			private final boolean addUnallocSpace;
+			private final boolean skipFatFsOrphans;
+			private final String imageWriterPath;
+			private volatile long tskAutoDbPointer;
+			private long imageId = 0;
+			private boolean isCanceled;
+			private final SleuthkitCase skCase;
+			private TskCaseDbBridge dbHelper;
 
-			private AddImageProcess(String timezone, boolean processUnallocSpace, boolean noFatFsOrphans) {
-				this.timezone = timezone;
-				this.processUnallocSpace = processUnallocSpace;
-				this.noFatFsOrphans = noFatFsOrphans;
-				autoDbPointer = 0;
+			/**
+			 * Constructs an object that encapsulates a multi-step process to
+			 * add an image to the case database.
+			 *
+			 * @param timeZone         The time zone of the image.
+			 * @param addUnallocSpace  Pass true to create virtual files for
+			 *                         unallocated space.
+			 * @param skipFatFsOrphans Pass true to skip processing of orphan
+			 *                         files for FAT file systems.
+			 * @param imageWriterPath  Path that a copy of the image should be
+			 *                         written to. Use empty string to disable
+			 *                         image writing
+			 */
+			private AddImageProcess(String timeZone, boolean addUnallocSpace, boolean skipFatFsOrphans, String imageWriterPath, SleuthkitCase skCase) {
+				this.timeZone = timeZone;
+				this.addUnallocSpace = addUnallocSpace;
+				this.skipFatFsOrphans = skipFatFsOrphans;
+				this.imageWriterPath = imageWriterPath;
+				tskAutoDbPointer = 0;
+				this.isCanceled = false;
+				this.skCase = skCase;
+				
 			}
 
 			/**
-			 * Start the process of adding an image to the case database. MUST
-			 * call either commit() or revert() after calling run().
+			 * Starts the process of adding an image to the case database.
 			 *
-			 * @param imgPath Full path(s) to the image file(s).
-			 * @throws TskCoreException exception thrown if critical error
-			 * occurs within TSK
-			 * @throws TskDataException exception thrown if non-critical error
-			 * occurs within TSK (should be OK to continue)
+			 * @param deviceId       An ASCII-printable identifier for the
+			 *                       device associated with the image that
+			 *                       should be unique across multiple cases
+			 *                       (e.g., a UUID).
+			 * @param imageFilePaths Full path(s) to the image file(s).
+			 * @param sectorSize     The sector size (use '0' for autodetect).
+			 *
+			 * @throws TskCoreException if a critical error occurs within the
+			 *                          SleuthKit.
+			 * @throws TskDataException if a non-critical error occurs within
+			 *                          the SleuthKit (should be OK to continue
+			 *                          the process)
 			 */
-			public void run(String[] imgPath) throws TskCoreException, TskDataException {
-				if (autoDbPointer != 0) {
-					throw new TskCoreException("AddImgProcess:run: AutoDB pointer is already set");
-				}
-
-				synchronized (this) {
-					autoDbPointer = initAddImgNat(caseDbPointer, timezoneLongToShort(timezone), processUnallocSpace, noFatFsOrphans);
-				}
-				if (autoDbPointer == 0) {
-					//additional check in case initAddImgNat didn't throw exception
-					throw new TskCoreException("AddImgProcess::run: AutoDB pointer is NULL after initAddImgNat");
-				}
-				runAddImgNat(autoDbPointer, imgPath, imgPath.length, timezone);
+			public void run(String deviceId, String[] imageFilePaths, int sectorSize) throws TskCoreException, TskDataException {
+				Image img = addImageToDatabase(skCase, imageFilePaths, sectorSize, "", "", "", "", deviceId);
+				run(deviceId, img, sectorSize, new DefaultAddDataSourceCallbacks());
 			}
 
 			/**
-			 * Call while run() is executing in another thread to prematurely
-			 * halt the process. Must call revert() in the other thread once the
-			 * stopped run() returns.
+			 * Starts the process of adding an image to the case database.
 			 *
-			 * @throws TskCoreException exception thrown if critical error
-			 * occurs within TSK
+			 * @param deviceId       An ASCII-printable identifier for the
+			 *                       device associated with the image that
+			 *                       should be unique across multiple cases
+			 *                       (e.g., a UUID).
+			 * @param image          The image object (has already been added to the database)
+			 * @param sectorSize     The sector size (no longer used).
+			 * @param addDataSourceCallbacks  The callbacks to use to send data to ingest (may do nothing).
+			 *
+			 * @throws TskCoreException if a critical error occurs within the
+			 *                          SleuthKit.
+			 * @throws TskDataException if a non-critical error occurs within
+			 *                          the SleuthKit (should be OK to continue
+			 *                          the process)
 			 */
-			public void stop() throws TskCoreException {
-				if (autoDbPointer == 0) {
-					throw new TskCoreException("AddImgProcess::stop: AutoDB pointer is NULL");
+			public void run(String deviceId, Image image, int sectorSize, 
+					AddDataSourceCallbacks addDataSourceCallbacks) throws TskCoreException, TskDataException {			
+				dbHelper = new TskCaseDbBridge(skCase, addDataSourceCallbacks);
+				getTSKReadLock();
+				try {
+					long imageHandle = 0;
+					synchronized (this) {
+						if (0 != tskAutoDbPointer) {
+							throw new TskCoreException("Add image process already started");
+						}
+						if (!isCanceled) { //with isCanceled being guarded by this it will have the same value everywhere in this synchronized block
+							imageHandle = image.getImageHandle();
+							tskAutoDbPointer = initAddImgNat(dbHelper, timezoneLongToShort(timeZone), addUnallocSpace, skipFatFsOrphans);
+						}
+						if (0 == tskAutoDbPointer) {
+							throw new TskCoreException("initAddImgNat returned a NULL TskAutoDb pointer");
+						}
+					}
+					if (imageHandle != 0) {
+						runAddImgNat(tskAutoDbPointer, deviceId, imageHandle, image.getId(), timeZone, imageWriterPath);
+					}
+				} finally {
+					finishAddImageProcess();
+					releaseTSKReadLock();
 				}
-
-				stopAddImgNat(autoDbPointer);
-			}
+			}			
 
 			/**
-			 * Rollback a process that has already been run(), reverting the
-			 * database. This releases the C++ object and no additional
-			 * operations can be performed. This method is threadsafe.
+			 * Stops the process of adding the image to the case database that
+			 * was started by calling AddImageProcess.run.
+			 * AddImageProcess.revert should be called after calling
+			 * AddImageProcess.stop.
 			 *
-			 * @throws TskCoreException exception thrown if critical error
-			 * occurs within TSK
+			 * @throws TskCoreException if a critical error occurs within the
+			 *                          SleuthKit.
 			 */
+			public synchronized void stop() throws TskCoreException {
+				getTSKReadLock();
+				try {
+					isCanceled = true;
+					if (tskAutoDbPointer != 0) {
+						stopAddImgNat(tskAutoDbPointer);
+					}
+				} finally {
+					releaseTSKReadLock();
+				}
+			}
+			
+			/**
+			 * Call at the end of the add image process regardless of the error/canceled state.
+			 * 
+			 * Note that the new image is no longer deleted on error/cancellation
+			 * 
+			 * If the process was not canceled, will add the final batch of files to the database
+			 * and submit for any further processing through the callback. 
+			 * 
+			 * @throws TskCoreException 
+			 */
+			private synchronized void finishAddImageProcess() throws TskCoreException {
+				if (tskAutoDbPointer == 0) {
+					return;
+				}
+
+				// If the process wasn't cancelled, finish up processing the
+				// remaining files.
+				if (! this.isCanceled && dbHelper != null) {
+					dbHelper.finish();
+				}
+
+				// Free the auto DB pointer and get the image ID
+				imageId = finishAddImgNat(tskAutoDbPointer);
+				tskAutoDbPointer = 0;
+
+				skCase.addDataSourceToHasChildrenMap();
+			}			
+
+			/**
+			 * This no longer needs to be called.
+			 *
+			 * @throws TskCoreException if a critical error occurs within the
+			 *                          SleuthKit.
+			 * 
+			 * @deprecated No longer necessary
+			 */
+			@Deprecated
 			public synchronized void revert() throws TskCoreException {
-				if (autoDbPointer == 0) {
-					throw new TskCoreException("AddImgProcess::revert: AutoDB pointer is NULL");
-				}
-
-				revertAddImgNat(autoDbPointer);
-				// the native code deleted the object
-				autoDbPointer = 0;
+				// No-op
 			}
 
 			/**
-			 * Finish off a process that has already been run(), closing the
-			 * transaction and committing the new image data to the database.
+			 * This no longer needs to be called. Will simply return the 
+			 * object ID of the new image.
 			 *
-			 * @return The id of the image that was added. This releases the C++
-			 * object and no additional operations can be performed. This method
-			 * is threadsafe.
+			 * @return The object id of the image that was added.
 			 *
-			 * @throws TskCoreException exception thrown if critical error
-			 * occurs within TSK
+			 * @throws TskCoreException if a critical error occurs within the
+			 *                          SleuthKit.
+			 * 
+			 * @deprecated No longer necessary
 			 */
+			@Deprecated
 			public synchronized long commit() throws TskCoreException {
-				if (autoDbPointer == 0) {
-					throw new TskCoreException("AddImgProcess::commit: AutoDB pointer is NULL");
-				}
-
-				long id = commitAddImgNat(autoDbPointer);
-				// the native code deleted the object
-				autoDbPointer = 0;
-				return id;
+				return imageId;
 			}
 
 			/**
-			 * Gets the directory currently being processed by TSK. This method
-			 * is threadsafe.
+			 * Gets the file system directory currently being processed by the
+			 * SleuthKit.
 			 *
-			 * @return the currently processing directory
+			 * @return The directory
 			 */
 			public synchronized String currentDirectory() {
-				return autoDbPointer == 0 ? "NO_INFO" : getCurDirNat(autoDbPointer);
+				return tskAutoDbPointer == 0 ? "" : getCurDirNat(tskAutoDbPointer); //NON-NLS
+			}
+
+			/**
+			 * Starts the process of adding an image to the case database.
+			 * Either commit() or revert() MUST be called after calling run().
+			 *
+			 * @param imageFilePaths Full path(s) to the image file(s).
+			 *
+			 * @throws TskCoreException if a critical error occurs within the
+			 *                          SleuthKit.
+			 * @throws TskDataException if a non-critical error occurs within
+			 *                          the SleuthKit (should be OK to continue
+			 *                          the process)
+			 *
+			 * @deprecated Use run(String dataSourceId, String[] imageFilePaths)
+			 * instead
+			 */
+			@Deprecated
+			public void run(String[] imageFilePaths) throws TskCoreException, TskDataException {
+				run(null, imageFilePaths, 0);
+			}
+
+			/**
+			 * Starts the process of adding an image to the case database.
+			 *
+			 * @param deviceId       An ASCII-printable identifier for the
+			 *                       device associated with the image that
+			 *                       should be unique across multiple cases
+			 *                       (e.g., a UUID).
+			 * @param imageFilePaths Full path(s) to the image file(s).
+			 *
+			 * @throws TskCoreException if a critical error occurs within the
+			 *                          SleuthKit.
+			 * @throws TskDataException if a non-critical error occurs within
+			 *                          the SleuthKit (should be OK to continue
+			 *                          the process)
+			 */
+			public void run(String deviceId, String[] imageFilePaths) throws TskCoreException, TskDataException {
+				run(deviceId, imageFilePaths, 0);
 			}
 		}
+
 	}
 
 	/**
@@ -334,12 +712,30 @@ public class SleuthkitJNI {
 	 * when done.
 	 *
 	 * @param path Location to create the database at.
+	 *
 	 * @return Handle for a new TskCaseDb instance.
+	 *
 	 * @throws TskCoreException exception thrown if critical error occurs within
-	 * TSK
+	 *                          TSK
 	 */
 	static CaseDbHandle newCaseDb(String path) throws TskCoreException {
-		return new CaseDbHandle(newCaseDbNat(path));
+		return new CaseDbHandle(path);
+	}
+
+	/**
+	 * Creates a new case database. Must call .free() on CaseDbHandle instance
+	 * when done.
+	 *
+	 * @param databaseName the name of the database to create
+	 * @param info         the connection info class for the database to create
+	 *
+	 * @return Handle for a new TskCaseDb instance.
+	 *
+	 * @throws TskCoreException exception thrown if critical error occurs within
+	 *                          TSK
+	 */
+	static CaseDbHandle newCaseDb(String databaseName, CaseDbConnectionInfo info) throws TskCoreException {
+		return new CaseDbHandle(databaseName, info);
 	}
 
 	/**
@@ -347,12 +743,30 @@ public class SleuthkitJNI {
 	 * instance when done.
 	 *
 	 * @param path Location of the existing database.
+	 *
 	 * @return Handle for a new TskCaseDb instance.
+	 *
 	 * @throws TskCoreException exception thrown if critical error occurs within
-	 * TSK
+	 *                          TSK
 	 */
 	static CaseDbHandle openCaseDb(String path) throws TskCoreException {
-		return new CaseDbHandle(openCaseDbNat(path));
+		return new CaseDbHandle(path);
+	}
+
+	/**
+	 * Opens an existing case database. Must call .free() on CaseDbHandle
+	 * instance when done.
+	 *
+	 * @param databaseName the name of the database to open
+	 * @param info         the connection info class for the database to open
+	 *
+	 * @return Handle for a new TskCaseDb instance.
+	 *
+	 * @throws TskCoreException exception thrown if critical error occurs within
+	 *                          TSK
+	 */
+	static CaseDbHandle openCaseDb(String databaseName, CaseDbConnectionInfo info) throws TskCoreException {
+		return new CaseDbHandle(databaseName, info);
 	}
 
 	/**
@@ -366,53 +780,235 @@ public class SleuthkitJNI {
 
 	/**
 	 * Enable verbose logging and redirect stderr to the given log file.
+	 *
+	 * @param logPath the log file path
 	 */
 	public static void startVerboseLogging(String logPath) {
 		startVerboseLoggingNat(logPath);
 	}
 
 	/**
-	 * open the image and return the image info pointer
+	 * Open the image and return the image info pointer.
 	 *
 	 * @param imageFiles the paths to the images
+	 * @param skCase     the case this image belongs to
+	 *
 	 * @return the image info pointer
+	 *
 	 * @throws TskCoreException exception thrown if critical error occurs within
-	 * TSK
+	 *                          TSK
 	 */
-	public synchronized static long openImage(String[] imageFiles) throws TskCoreException {
-		long imageHandle = 0;
+	public static long openImage(String[] imageFiles, SleuthkitCase skCase) throws TskCoreException {
+		if (skCase == null) {
+			throw new TskCoreException("SleuthkitCase can not be null");
+		}
+		return openImage(imageFiles, 0, true, skCase.getCaseHandleIdentifier());
+	}
 
+	/**
+	 * Open the image with a specified sector size and return the image info
+	 * pointer.
+	 *
+	 * @param imageFiles the paths to the images
+	 * @param sSize      the sector size (use '0' for autodetect)
+	 * @param skCase     the case this image belongs to
+	 *
+	 * @return the image info pointer
+	 *
+	 * @throws TskCoreException exception thrown if critical error occurs within
+	 *                          TSK
+	 */
+	public static long openImage(String[] imageFiles, int sSize, SleuthkitCase skCase) throws TskCoreException {
+		if (skCase == null) {
+			throw new TskCoreException("SleuthkitCase can not be null");
+		}
+		return openImage(imageFiles, sSize, true, skCase.getCaseHandleIdentifier());
+	}
+	
+	/**
+	 * Open the image and return the image info pointer. This is a temporary
+	 * measure to allow ingest of multiple local disks on the same drive letter.
+	 * We need to clear the cache to make sure cached data from the first drive
+	 * is not used.
+	 *
+	 * @param imageFiles the paths to the images
+	 * @param sSize      the sector size (use '0' for autodetect)
+	 * @param useCache   true if the image handle cache should be used, false to
+	 *                   always go to TSK to open a fresh copy
+	 * @param caseIdentifer The caseDbIdentifier for this case. Can be null to support deprecated methods.
+	 *
+	 * @return the image info pointer
+	 *
+	 * @throws TskCoreException exception thrown if critical error occurs within
+	 *                          TSK
+	 */
+	private static long openImage(String[] imageFiles, int sSize, boolean useCache, String caseIdentifer) throws TskCoreException {
+		getTSKReadLock();
+		try {
+			long imageHandle;
+
+			StringBuilder keyBuilder = new StringBuilder();
+			for (int i = 0; i < imageFiles.length; ++i) {
+				keyBuilder.append(imageFiles[i]);
+			}
+			final String imageKey = keyBuilder.toString();
+
+			synchronized (HandleCache.cacheLock) {
+				String nonNullCaseIdentifer = caseIdentifer;
+				if (nonNullCaseIdentifer == null) {
+					nonNullCaseIdentifer = HandleCache.getDefaultCaseIdentifier();
+				}
+				
+				// If we're getting a fresh copy and an image with this path is already
+				// in the cache, move the existing cache reference so it won't be used by 
+				// any subsequent calls to openImage but will still be valid if any objects
+				// have it cached. This happens in the case where the user adds the same data
+				// source twice (see JIRA-5868).
+				if (!useCache && HandleCache.getCaseHandles(nonNullCaseIdentifer).imageHandleCache.containsKey(imageKey)) {
+					long tempImageHandle = HandleCache.getCaseHandles(nonNullCaseIdentifer).imageHandleCache.get(imageKey);
+					
+					// Store the old image handle in a fake path. This way it will no longer be found but will
+					// still be valid and the image and its file systems will be closed with the case.
+					String newPath = "Image_" + UUID.randomUUID().toString();
+					HandleCache.getCaseHandles(nonNullCaseIdentifer).imageHandleCache.put(newPath, tempImageHandle);
+					HandleCache.getCaseHandles(nonNullCaseIdentifer).imageHandleCache.remove(imageKey);
+				}
+
+				if (useCache && HandleCache.getCaseHandles(nonNullCaseIdentifer).imageHandleCache.containsKey(imageKey)) //get from cache
+				{
+					imageHandle = HandleCache.getCaseHandles(nonNullCaseIdentifer).imageHandleCache.get(imageKey);
+				} else {
+					//open new handle and cache it
+					imageHandle = openImgNat(imageFiles, imageFiles.length, sSize);
+					HandleCache.getCaseHandles(nonNullCaseIdentifer).fsHandleCache.put(imageHandle, new HashMap<>());
+					HandleCache.getCaseHandles(nonNullCaseIdentifer).imageHandleCache.put(imageKey, imageHandle);
+				}
+			}
+			return imageHandle;
+		} finally {
+			releaseTSKReadLock();
+		}
+	}
+	
+	/**
+	 * This is a temporary measure to support opening an image at the beginning
+	 * of the add image process. The open image handle is put into the normal image cache so
+	 * it won't be opened a second time and it will be closed during case closing.
+	 * 
+	 * This will change when all image opens are done by object ID and not paths.
+	 * 
+	 * @param skCase      The case the image belongs to.
+	 * @param imagePaths  The complete list of paths for the image.
+	 * @param imageHandle The open image handle from TSK.
+	 * 
+	 * @throws TskCoreException If the new image could not be added to the cache
+	 */
+	private static void cacheImageHandle(SleuthkitCase skCase, List<String> imagePaths, long imageHandle) throws TskCoreException {
+		
+		// Construct the hash key from the image paths
 		StringBuilder keyBuilder = new StringBuilder();
-		for (int i = 0; i < imageFiles.length; ++i) {
-			keyBuilder.append(imageFiles[i]);
+		for (int i = 0; i < imagePaths.size(); ++i) {
+			keyBuilder.append(imagePaths.get(i));
 		}
 		final String imageKey = keyBuilder.toString();
+		
+		// Get the case identifier
+		String caseIdentifier = skCase.getCaseHandleIdentifier();
 
-		if (CaseDbHandle.imageHandleCache.containsKey(imageKey)) //get from cache
-		{
-			imageHandle = CaseDbHandle.imageHandleCache.get(imageKey);
-		} else {
-			//open new handle and cache it
-			imageHandle = openImgNat(imageFiles, imageFiles.length);
-			CaseDbHandle.fsHandleCache.put(imageHandle, new HashMap<Long, Long>());
-			CaseDbHandle.imageHandleCache.put(imageKey, imageHandle);
+		synchronized (HandleCache.cacheLock) {
+			HandleCache.getCaseHandles(caseIdentifier).fsHandleCache.put(imageHandle, new HashMap<>());
+			HandleCache.getCaseHandles(caseIdentifier).imageHandleCache.put(imageKey, imageHandle);
 		}
-
-		return imageHandle;
-
 	}
+	
+	/**
+	 * Add an image to the database and return the open image.
+	 * 
+	 * @param skCase     The current case.
+	 * @param imagePaths The path(s) to the image (will just be the first for .e01, .001, etc).
+	 * @param sectorSize The sector size (0 for auto-detect).
+	 * @param timeZone   The time zone.
+	 * @param md5fromSettings        MD5 hash (if known).
+	 * @param sha1fromSettings       SHA1 hash (if known).
+	 * @param sha256fromSettings     SHA256 hash (if known).
+	 * @param deviceId   Device ID.
+	 * 
+	 * @return The Image object.
+	 * 
+	 * @throws TskCoreException 
+	 */
+	public static Image addImageToDatabase(SleuthkitCase skCase, String[] imagePaths, int sectorSize,
+		String timeZone, String md5fromSettings, String sha1fromSettings, String sha256fromSettings, String deviceId) throws TskCoreException {
+		
+		// Open the image
+		long imageHandle = openImgNat(imagePaths, 1, sectorSize);
+		
+		// Get the fields stored in the native code
+		List<String> computedPaths = Arrays.asList(getPathsForImageNat(imageHandle));
+		long size = getSizeForImageNat(imageHandle);
+		long type = getTypeForImageNat(imageHandle);
+		long computedSectorSize = getSectorSizeForImageNat(imageHandle);
+		String md5 = md5fromSettings;
+		if (StringUtils.isEmpty(md5)) {
+			md5 = getMD5HashForImageNat(imageHandle);
+		}
+		String sha1 = sha1fromSettings;
+		if (StringUtils.isEmpty(sha1)) {
+			sha1 = getSha1HashForImageNat(imageHandle);
+		}
+		// Sleuthkit does not currently generate any SHA256 hashes. Set to empty
+		// string for consistency.
+		String sha256 = sha256fromSettings;
+		if (sha256 == null) {
+			sha256 = "";
+		}
+		String collectionDetails = getCollectionDetailsForImageNat(imageHandle);
+		
+		//  Now save to database
+		CaseDbTransaction transaction = skCase.beginTransaction();
+		try {
+			Image img = skCase.addImage(TskData.TSK_IMG_TYPE_ENUM.valueOf(type), computedSectorSize, 
+				size, null, computedPaths, 
+				timeZone, md5, sha1, sha256, 
+				deviceId, transaction);
+			if (!StringUtils.isEmpty(collectionDetails)) {
+				skCase.setAcquisitionDetails(img, collectionDetails);
+			}
+			transaction.commit();
+			
+		    img.setImageHandle(imageHandle);
+			cacheImageHandle(skCase, computedPaths, imageHandle);
+			return img;
+		} catch (TskCoreException ex) {
+			transaction.rollback();
+			throw(ex);
+		}
+	}
+	
+	
 
 	/**
 	 * Get volume system Handle
 	 *
 	 * @param imgHandle a handle to previously opened image
-	 * @param vsOffset byte offset in the image to the volume system (usually 0)
+	 * @param vsOffset  byte offset in the image to the volume system (usually
+	 *                  0)
+	 *
 	 * @return pointer to a vsHandle structure in the sleuthkit
+	 *
 	 * @throws TskCoreException exception thrown if critical error occurs within
-	 * TSK
+	 *                          TSK
 	 */
 	public static long openVs(long imgHandle, long vsOffset) throws TskCoreException {
-		return openVsNat(imgHandle, vsOffset);
+		getTSKReadLock();
+		try {
+			if(! imgHandleIsValid(imgHandle)) {
+				throw new TskCoreException("Image handle " + imgHandle + " is closed");
+			}
+			return openVsNat(imgHandle, vsOffset);
+		} finally {
+			releaseTSKReadLock();
+		}
 	}
 
 	//get pointers
@@ -420,53 +1016,269 @@ public class SleuthkitJNI {
 	 * Get volume Handle
 	 *
 	 * @param vsHandle pointer to the volume system structure in the sleuthkit
-	 * @param volId id of the volume
+	 * @param volId    id of the volume
+	 *
 	 * @return pointer to a volHandle structure in the sleuthkit
+	 *
 	 * @throws TskCoreException exception thrown if critical error occurs within
-	 * TSK
+	 *                          TSK
 	 */
 	public static long openVsPart(long vsHandle, long volId) throws TskCoreException {
-		//returned long is ptr to vs Handle object in tsk
-		return openVolNat(vsHandle, volId);
+		getTSKReadLock();
+		try {
+			//returned long is ptr to vs Handle object in tsk
+			return openVolNat(vsHandle, volId);
+		} finally {
+			releaseTSKReadLock();
+		}
 	}
-
+	
+	/**
+	 * Get pool Handle
+	 *
+	 * @param imgHandle pointer to the image structure in the sleuthkit
+	 * @param offset    offset of the pool
+	 *
+	 * @return pointer to a pool info structure in the sleuthkit
+	 *
+	 * @throws TskCoreException exception thrown if critical error occurs within
+	 *                          TSK
+	 */
+	static long openPool(long imgHandle, long offset, SleuthkitCase skCase) throws TskCoreException {
+		getTSKReadLock();
+		try {
+			if(! imgHandleIsValid(imgHandle)) {
+				throw new TskCoreException("Image handle " + imgHandle + " is closed");
+			}
+			
+			synchronized (HandleCache.cacheLock) {
+				String caseIdentifier;
+				if (skCase == null) {
+					caseIdentifier = HandleCache.getDefaultCaseIdentifier();
+				} else {
+					caseIdentifier = skCase.getCaseHandleIdentifier();
+				}
+				
+				// If a pool handle cache for this image does not exist, make one
+				if (! HandleCache.getCaseHandles(caseIdentifier).poolHandleCache.containsKey(imgHandle)) {
+					HandleCache.getCaseHandles(caseIdentifier).poolHandleCache.put(imgHandle, new HashMap<>());
+				}
+				
+				// Get the pool handle cache for this image
+				Map<Long, Long> poolCacheForImage = HandleCache.getCaseHandles(caseIdentifier).poolHandleCache.get(imgHandle);
+				
+				if (poolCacheForImage.containsKey(offset)) {
+					return poolCacheForImage.get(offset);
+				} else {
+					//returned long is ptr to pool Handle object in tsk
+					long poolHandle = openPoolNat(imgHandle, offset);
+					poolCacheForImage.put(offset, poolHandle);
+					return poolHandle;
+				}
+			}
+		} finally {
+			releaseTSKReadLock();
+		}
+	}	
+	
 	/**
 	 * Get file system Handle Opened handle is cached (transparently) so it does
 	 * not need be reopened next time for the duration of the application
 	 *
 	 * @param imgHandle pointer to imgHandle in sleuthkit
-	 * @param fsOffset byte offset to the file system
+	 * @param fsOffset  byte offset to the file system
+	 * @param skCase    the case containing the file system
+	 *
 	 * @return pointer to a fsHandle structure in the sleuthkit
+	 *
 	 * @throws TskCoreException exception thrown if critical error occurs within
-	 * TSK
+	 *                          TSK
 	 */
-	public synchronized static long openFs(long imgHandle, long fsOffset) throws TskCoreException {
-		long fsHandle = 0;
-		final Map<Long, Long> imgOffSetToFsHandle = CaseDbHandle.fsHandleCache.get(imgHandle);
-		if (imgOffSetToFsHandle.containsKey(fsOffset)) {
-			//return cached
-			fsHandle = imgOffSetToFsHandle.get(fsOffset);
-		} else {
-			fsHandle = openFsNat(imgHandle, fsOffset);
-			//cache it
-			imgOffSetToFsHandle.put(fsOffset, fsHandle);
+	public static long openFs(long imgHandle, long fsOffset, SleuthkitCase skCase) throws TskCoreException {
+		getTSKReadLock();
+		try {
+			long fsHandle;
+			synchronized (HandleCache.cacheLock) {
+				String caseIdentifier;
+				if (skCase == null) {
+					caseIdentifier = HandleCache.getDefaultCaseIdentifier();
+				} else {
+					caseIdentifier = skCase.getCaseHandleIdentifier();
+				}
+				final Map<Long, Long> imgOffSetToFsHandle = HandleCache.getCaseHandles(caseIdentifier).fsHandleCache.get(imgHandle);
+				if (imgOffSetToFsHandle == null) {
+					throw new TskCoreException("Missing image offset to file system handle cache for image handle " + imgHandle);
+				}
+				if (imgOffSetToFsHandle.containsKey(fsOffset)) {
+					//return cached
+					fsHandle = imgOffSetToFsHandle.get(fsOffset);
+				} else {
+					fsHandle = openFsNat(imgHandle, fsOffset);
+					//cache it
+					imgOffSetToFsHandle.put(fsOffset, fsHandle);
+				}
+			}
+			return fsHandle;
+		} finally {
+			releaseTSKReadLock();
 		}
-		return fsHandle;
+	}
+	
+	/**
+	 * Get file system handle for a file system contained in a pool.
+	 * Opened handle is cached (transparently) so it does
+	 * not need be reopened next time for the duration of the application
+	 * 
+	 * @param imgHandle pointer to imgHandle in sleuthkit
+	 * @param fsOffset  byte offset to the file system
+	 * @param poolHandle pointer to the pool info handle
+	 * @param poolBlock  pool block
+	 * @param skCase    the case containing the file system
+	 * 
+	 * @return pointer to a fsHandle structure in the sleuthkit
+	 * 
+	 * @throws TskCoreException exception thrown if critical error occurs within
+	 *                          TSK
+	 */
+	static long openFsPool(long imgHandle, long fsOffset, long poolHandle, long poolBlock, SleuthkitCase skCase) throws TskCoreException {
+		/*
+		 * Currently, our APFS code is not thread-safe and it is the only code
+		 * that uses pools. To prevent crashes, we make any reads to a file system
+		 * contained in a pool single-threaded.
+		 */
+		getTSKWriteLock();
+		try {
+			long fsHandle;
+			synchronized (HandleCache.cacheLock) {
+				String caseIdentifier;
+				if (skCase == null) {
+					caseIdentifier = HandleCache.getDefaultCaseIdentifier();
+				} else {
+					caseIdentifier = skCase.getCaseHandleIdentifier();
+				}
+				final Map<Long, Long> imgOffSetToFsHandle = HandleCache.getCaseHandles(caseIdentifier).fsHandleCache.get(imgHandle);
+				if (imgOffSetToFsHandle == null) {
+					throw new TskCoreException("Missing image offset to file system handle cache for image handle " + imgHandle);
+				}
+				
+				if (imgOffSetToFsHandle.containsKey(poolBlock)) {
+					//return cached
+					fsHandle = imgOffSetToFsHandle.get(poolBlock);
+				} else {
+					long poolImgHandle = getImgInfoForPoolNat(poolHandle, poolBlock);
+					HandleCache.getCaseHandles(caseIdentifier).poolImgCache.add(poolImgHandle);
+					fsHandle = openFsNat(poolImgHandle, fsOffset);
+					//cache it
+					imgOffSetToFsHandle.put(poolBlock, fsHandle);
+					HandleCache.getCaseHandles(caseIdentifier).poolFsList.add(fsHandle);
+				}
+			}
+			return fsHandle;
+		} finally {
+			releaseTSKWriteLock();
+		}
 	}
 
 	/**
 	 * Get file Handle
 	 *
 	 * @param fsHandle fsHandle pointer in the sleuthkit
-	 * @param fileId id of the file
+	 * @param fileId   id of the file
 	 * @param attrType file attribute type to open
-	 * @param attrId file attribute id to open
+	 * @param attrId   file attribute id to open
+	 * @param skCase   the case associated with this file
+	 *
 	 * @return pointer to a file structure in the sleuthkit
+	 *
 	 * @throws TskCoreException exception thrown if critical error occurs within
-	 * TSK
+	 *                          TSK
 	 */
-	public static long openFile(long fsHandle, long fileId, TSK_FS_ATTR_TYPE_ENUM attrType, int attrId) throws TskCoreException {
-		return openFileNat(fsHandle, fileId, attrType.getValue(), attrId);
+	public static long openFile(long fsHandle, long fileId, TSK_FS_ATTR_TYPE_ENUM attrType, int attrId, SleuthkitCase skCase) throws TskCoreException {
+		/*
+		 * NOTE: previously attrId used to be stored in AbstractFile as (signed)
+		 * short even though it is stored as uint16 in TSK. In extremely rare
+		 * occurrences attrId can be larger than what a signed short can hold
+		 * (2^15). Changes were made to AbstractFile to store attrId as integer.
+		 * However, a depricated method still exists in AbstractFile to get
+		 * attrId as short. In that method we convert attribute ids that are
+		 * larger than 32K to a negative number. Therefore if encountered, we
+		 * need to convert negative attribute id to uint16 which is what TSK is
+		 * using to store attribute id.
+		 */
+		boolean withinPool = false;
+		synchronized (HandleCache.cacheLock) {
+			String caseIdentifier;
+			if (skCase == null) {
+				caseIdentifier = HandleCache.getDefaultCaseIdentifier();
+			} else {
+				caseIdentifier = skCase.getCaseHandleIdentifier();
+			}
+			if (HandleCache.getCaseHandles(caseIdentifier).poolFsList.contains(fsHandle)) {
+				withinPool = true;
+			}
+		}
+		
+		/*
+		 * The current APFS code is not thread-safe. To compensate, we make any
+		 * reads to the APFS pool single-threaded by obtaining a write
+		 * lock instead of a read lock.
+		 */
+		if (withinPool) {
+			getTSKWriteLock();
+		} else {
+			getTSKReadLock();
+		}
+		try {
+			long fileHandle = openFileNat(fsHandle, fileId, attrType.getValue(), convertSignedToUnsigned(attrId));
+			synchronized (HandleCache.cacheLock) {
+				String caseIdentifier;
+				if (skCase == null) {
+					caseIdentifier = HandleCache.getDefaultCaseIdentifier();
+				} else {
+					caseIdentifier = skCase.getCaseHandleIdentifier();
+				}
+				HandleCache.addFileHandle(caseIdentifier, fileHandle, fsHandle);
+
+				// If this file is in a pool file system, record it so the locks
+				// can be set appropriately when reading it.
+				if (withinPool) {
+					HandleCache.poolFileHandles.add(fileHandle);
+				}
+			}
+			return fileHandle;
+		} finally {
+			if (withinPool) {
+				releaseTSKWriteLock();
+			} else {
+				releaseTSKReadLock();
+			}
+		}
+	}
+
+	/**
+	 * Converts signed integer to an unsigned integer.
+	 *
+	 * @param val value to be converter
+	 *
+	 * @return unsigned integer value
+	 */
+	private static int convertSignedToUnsigned(int val) {
+		if (val >= 0) {
+			return val;
+		}
+
+		return val & 0xffff;	// convert negative value to positive value
+	}
+	
+	/**
+	 * Test that the given image handle is valid.
+	 * @param imgHandle
+	 * @return true if it is valid, false otherwise
+	 */
+	private static boolean imgHandleIsValid(long imgHandle) {
+		synchronized(HandleCache.cacheLock) {
+			return HandleCache.isImageInAnyCache(imgHandle);
+		}
 	}
 
 	//do reads
@@ -475,66 +1287,137 @@ public class SleuthkitJNI {
 	 *
 	 * @param imgHandle
 	 * @param readBuffer buffer to read to
-	 * @param offset byte offset in the image to start at
-	 * @param len amount of data to read
+	 * @param offset     byte offset in the image to start at
+	 * @param len        amount of data to read
+	 *
 	 * @return the number of characters read, or -1 if the end of the stream has
-	 * been reached
+	 *         been reached
+	 *
 	 * @throws TskCoreException exception thrown if critical error occurs within
-	 * TSK
+	 *                          TSK
 	 */
 	public static int readImg(long imgHandle, byte[] readBuffer, long offset, long len) throws TskCoreException {
-		//returned byte[] is the data buffer
-		return readImgNat(imgHandle, readBuffer, offset, len);
+		getTSKReadLock();
+		try {
+			if(! imgHandleIsValid(imgHandle)) {
+				throw new TskCoreException("Image handle " + imgHandle + " is closed");
+			}
+			//returned byte[] is the data buffer
+			return readImgNat(imgHandle, readBuffer, offset, len);
+		} finally {
+			releaseTSKReadLock();
+		}
 	}
 
 	/**
 	 * reads data from an volume system
 	 *
-	 * @param vsHandle pointer to a volume system structure in the sleuthkit
+	 * @param vsHandle   pointer to a volume system structure in the sleuthkit
 	 * @param readBuffer buffer to read to
-	 * @param offset sector offset in the image to start at
-	 * @param len amount of data to read
+	 * @param offset     sector offset in the image to start at
+	 * @param len        amount of data to read
+	 *
 	 * @return the number of characters read, or -1 if the end of the stream has
-	 * been reached
+	 *         been reached
+	 *
 	 * @throws TskCoreException exception thrown if critical error occurs within
-	 * TSK
+	 *                          TSK
 	 */
 	public static int readVs(long vsHandle, byte[] readBuffer, long offset, long len) throws TskCoreException {
-		return readVsNat(vsHandle, readBuffer, offset, len);
+		getTSKReadLock();
+		try {
+			return readVsNat(vsHandle, readBuffer, offset, len);
+		} finally {
+			releaseTSKReadLock();
+		}
+	}
+	
+	/**
+	 * Reads data from a pool
+	 * 
+	 * @param poolHandle handle to the pool info struct
+	 * @param readBuffer buffer to read into
+	 * @param offset     starting offset
+	 * @param len        length
+	 * 
+	 * @return number of bytes read
+	 * 
+	 * @throws TskCoreException 
+	 */
+	static int readPool(long poolHandle, byte[] readBuffer, long offset, long len) throws TskCoreException {
+		getTSKReadLock();
+		try {
+			return readPoolNat(poolHandle, readBuffer, offset, len);
+		} finally {
+			releaseTSKReadLock();
+		}
 	}
 
 	/**
 	 * reads data from an volume
 	 *
-	 * @param volHandle pointer to a volume structure in the sleuthkit
+	 * @param volHandle  pointer to a volume structure in the sleuthkit
 	 * @param readBuffer buffer to read to
-	 * @param offset byte offset in the image to start at
-	 * @param len amount of data to read
+	 * @param offset     byte offset in the image to start at
+	 * @param len        amount of data to read
+	 *
 	 * @return the number of characters read, or -1 if the end of the stream has
-	 * been reached
+	 *         been reached
+	 *
 	 * @throws TskCoreException exception thrown if critical error occurs within
-	 * TSK
+	 *                          TSK
 	 */
 	public static int readVsPart(long volHandle, byte[] readBuffer, long offset, long len) throws TskCoreException {
-		//returned byte[] is the data buffer
-		return readVolNat(volHandle, readBuffer, offset, len);
+		getTSKReadLock();
+		try {
+			//returned byte[] is the data buffer
+			return readVolNat(volHandle, readBuffer, offset, len);
+		} finally {
+			releaseTSKReadLock();
+		}
 	}
 
 	/**
 	 * reads data from an file system
 	 *
-	 * @param fsHandle pointer to a file system structure in the sleuthkit
+	 * @param fsHandle   pointer to a file system structure in the sleuthkit
 	 * @param readBuffer buffer to read to
-	 * @param offset byte offset in the image to start at
-	 * @param len amount of data to read
+	 * @param offset     byte offset in the image to start at
+	 * @param len        amount of data to read
+	 *
 	 * @return the number of characters read, or -1 if the end of the stream has
-	 * been reached
+	 *         been reached
+	 *
 	 * @throws TskCoreException exception thrown if critical error occurs within
-	 * TSK
+	 *                          TSK
 	 */
 	public static int readFs(long fsHandle, byte[] readBuffer, long offset, long len) throws TskCoreException {
-		//returned byte[] is the data buffer
-		return readFsNat(fsHandle, readBuffer, offset, len);
+		getTSKReadLock();
+		try {
+			//returned byte[] is the data buffer
+			return readFsNat(fsHandle, readBuffer, offset, len);
+		} finally {
+			releaseTSKReadLock();
+		}
+	}
+
+	/**
+	 * enum used to tell readFileNat whether the offset is from the beginning of
+	 * the file or from the beginning of the slack space.
+	 */
+	private enum TSK_FS_FILE_READ_OFFSET_TYPE_ENUM {
+		START_OF_FILE(0),
+		START_OF_SLACK(1);
+
+		private final int val;
+
+		TSK_FS_FILE_READ_OFFSET_TYPE_ENUM(int val) {
+			this.val = val;
+		}
+
+		int getValue() {
+			return val;
+		}
 	}
 
 	/**
@@ -542,49 +1425,118 @@ public class SleuthkitJNI {
 	 *
 	 * @param fileHandle pointer to a file structure in the sleuthkit
 	 * @param readBuffer pre-allocated buffer to read to
-	 * @param offset byte offset in the image to start at
-	 * @param len amount of data to read
+	 * @param offset     byte offset in the image to start at
+	 * @param len        amount of data to read
+	 *
 	 * @return the number of characters read, or -1 if the end of the stream has
-	 * been reached
+	 *         been reached
+	 *
 	 * @throws TskCoreException exception thrown if critical error occurs within
-	 * TSK
+	 *                          TSK
 	 */
 	public static int readFile(long fileHandle, byte[] readBuffer, long offset, long len) throws TskCoreException {
-		return readFileNat(fileHandle, readBuffer, offset, len);
+		boolean withinPool = false;
+		synchronized (HandleCache.cacheLock) {
+			if (HandleCache.poolFileHandles.contains(fileHandle)) {
+				withinPool = true;
+			}
+		}
+		
+		/*
+		 * The current APFS code is not thread-safe. To compensate, we make any
+		 * reads to the APFS pool single-threaded by obtaining a write
+		 * lock instead of a read lock.
+		 */
+		if (withinPool) {
+			getTSKWriteLock();
+		} else {
+			getTSKReadLock();
+		}
+		try {
+			if (!HandleCache.isValidFileHandle(fileHandle)) {
+				throw new TskCoreException(HandleCache.INVALID_FILE_HANDLE);
+			}
+
+			return readFileNat(fileHandle, readBuffer, offset, TSK_FS_FILE_READ_OFFSET_TYPE_ENUM.START_OF_FILE.getValue(), len);
+		} finally {
+			if (withinPool) {
+				releaseTSKWriteLock();
+			} else {
+				releaseTSKReadLock();
+			}
+		}
 	}
 
-	//free pointers
 	/**
-	 * frees the imgHandle pointer currently does not close the image, until the
-	 * application terminates (image handle is cached)
+	 * reads data from the slack space of a file
 	 *
-	 * @param imgHandle to close the image
+	 * @param fileHandle pointer to a file structure in the sleuthkit
+	 * @param readBuffer pre-allocated buffer to read to
+	 * @param offset     byte offset in the slack to start at
+	 * @param len        amount of data to read
+	 *
+	 * @return the number of characters read, or -1 if the end of the stream has
+	 *         been reached
+	 *
+	 * @throws TskCoreException exception thrown if critical error occurs within
+	 *                          TSK
 	 */
-	public static void closeImg(long imgHandle) {
-		//@@@ TODO close the image handle when Case is closed instead
-		//currently the image handle is not being freed, it's cached for duration of the application
-		//closeImgNat(imgHandle); 
+	public static int readFileSlack(long fileHandle, byte[] readBuffer, long offset, long len) throws TskCoreException {
+		getTSKReadLock();
+		try {
+			if (!HandleCache.isValidFileHandle(fileHandle)) {
+				throw new TskCoreException(HandleCache.INVALID_FILE_HANDLE);
+			}
+
+			return readFileNat(fileHandle, readBuffer, offset, TSK_FS_FILE_READ_OFFSET_TYPE_ENUM.START_OF_SLACK.getValue(), len);
+		} finally {
+			releaseTSKReadLock();
+		}
 	}
 
 	/**
-	 * frees the vsHandle pointer
+	 * Get human readable (some what) details about a file. This is the same as
+	 * the 'istat' TSK tool
 	 *
-	 * @param vsHandle pointer to volume system structure in sleuthkit
+	 * @param fileHandle pointer to file structure in the sleuthkit
+	 *
+	 * @return text
+	 *
+	 * @throws TskCoreException if errors occurred
 	 */
-	public static void closeVs(long vsHandle) {
-		closeVsNat(vsHandle);
-	}
+	public static List<String> getFileMetaDataText(long fileHandle) throws TskCoreException {
+		getTSKReadLock();
+		try {
+			if (!HandleCache.isValidFileHandle(fileHandle)) {
+				throw new TskCoreException(HandleCache.INVALID_FILE_HANDLE);
+			}
 
-	/**
-	 * frees the fsHandle pointer Currently does not do anything - preserves the
-	 * cached object for the duration of the application
-	 *
-	 * @param fsHandle pointer to file system structure in sleuthkit
-	 */
-	public static void closeFs(long fsHandle) {
-		//@@@ TODO close the fs handle when Case is closed instead
-		//currently the fs handle is not being freed, it's cached for duration of the application
-		//closeFsNat(fsHandle);
+			try {
+				java.io.File tmp = java.io.File.createTempFile("tsk", ".txt");
+
+				saveFileMetaDataTextNat(fileHandle, tmp.getAbsolutePath());
+
+				FileReader fr = new FileReader(tmp.getAbsolutePath());
+				BufferedReader textReader = new BufferedReader(fr);
+
+				List<String> lines = new ArrayList<String>();
+				while (true) {
+					String line = textReader.readLine();
+					if (line == null) {
+						break;
+					}
+					lines.add(line);
+				}
+				textReader.close();
+				fr.close();
+				tmp.delete();
+				return lines;
+			} catch (IOException ex) {
+				throw new TskCoreException("Error reading istat output: " + ex.getLocalizedMessage());
+			}
+		} finally {
+			releaseTSKReadLock();
+		}
 	}
 
 	/**
@@ -593,110 +1545,263 @@ public class SleuthkitJNI {
 	 * @param fileHandle pointer to file structure in sleuthkit
 	 */
 	public static void closeFile(long fileHandle) {
-		closeFileNat(fileHandle);
+		closeFile(fileHandle, null);
+	}
+	
+	/**
+	 * frees the fileHandle pointer
+	 *
+	 * @param fileHandle pointer to file structure in sleuthkit
+	 * @param skCase     the case containing the file
+	 */
+	public static void closeFile(long fileHandle, SleuthkitCase skCase) {		
+		boolean withinPool = false;
+		synchronized (HandleCache.cacheLock) {
+			if (HandleCache.poolFileHandles.contains(fileHandle)) {
+				withinPool = true;
+			}
+		}
+		
+		/*
+		 * The current APFS code is not thread-safe. To compensate, we make any
+		 * reads to the APFS pool single-threaded by obtaining a write
+		 * lock instead of a read lock.
+		 */
+		if (withinPool) {
+			getTSKWriteLock();
+		} else {
+			getTSKReadLock();
+		}
+		try {
+			synchronized (HandleCache.cacheLock) {
+				if (!HandleCache.isValidFileHandle(fileHandle)) {
+					// File handle is not open so this is a no-op.
+					return;
+				}
+				closeFileNat(fileHandle);
+				HandleCache.removeFileHandle(fileHandle, skCase);
+				if (HandleCache.poolFileHandles.contains(fileHandle)) {
+					HandleCache.poolFileHandles.remove(fileHandle);
+				}
+			}
+		} finally {
+			if (withinPool) {
+				releaseTSKWriteLock();
+			} else {
+				releaseTSKReadLock();
+			}
+		}
 	}
 
 	/**
-	 * Create an index for the given database path.
+	 * Create an index for a hash database.
 	 *
-	 * @param dbPath The path to the database
+	 * @param dbHandle A hash database handle.
+	 *
 	 * @throws TskCoreException if a critical error occurs within TSK core
 	 */
-	public static void createLookupIndex(String dbPath) throws TskCoreException {
-		createLookupIndexNat(dbPath);
+	public static void createLookupIndexForHashDatabase(int dbHandle) throws TskCoreException {
+		hashDbCreateIndexNat(dbHandle);
 	}
 
 	/**
-	 * Check if an index exists for the given database path.
+	 * Check if an index exists for a hash database.
 	 *
-	 * @param dbPath
+	 * @param dbHandle A hash database handle.
+	 *
 	 * @return true if index exists
+	 *
 	 * @throws TskCoreException if a critical error occurs within TSK core
 	 */
-	public static boolean lookupIndexExists(String dbPath) throws TskCoreException {
-		return lookupIndexExistsNat(dbPath);
+	public static boolean hashDatabaseHasLookupIndex(int dbHandle) throws TskCoreException {
+		return hashDbIndexExistsNat(dbHandle);
 	}
 
 	/**
-	 * Set the NSRL database
+	 * hashDatabaseCanBeReindexed
 	 *
-	 * @param path The path to the database
-	 * @return a handle for that database
+	 * @param dbHandle previously opened hash db handle
+	 *
+	 * @return Does this database have a source database that is different than
+	 *         the index?
+	 *
 	 * @throws TskCoreException if a critical error occurs within TSK core
 	 */
-	public static int setNSRLDatabase(String path) throws TskCoreException {
-		return setDbNSRLNat(path);
+	public static boolean hashDatabaseCanBeReindexed(int dbHandle) throws TskCoreException {
+		return hashDbIsReindexableNat(dbHandle);
 	}
 
 	/**
-	 * Add the known bad database
+	 * getHashDatabasePath
 	 *
-	 * @param path The path to the database
-	 * @return a handle for that database
+	 * @param dbHandle previously opened hash db handle
+	 *
+	 * @return Hash db file path
+	 *
 	 * @throws TskCoreException if a critical error occurs within TSK core
 	 */
-	public static int addKnownBadDatabase(String path) throws TskCoreException {
-		return addDbKnownBadNat(path);
+	public static String getHashDatabasePath(int dbHandle) throws TskCoreException {
+		return hashDbPathNat(dbHandle);
+	}
+
+	/**
+	 * getHashDatabaseIndexPath
+	 *
+	 * @param dbHandle previously opened hash db handle
+	 *
+	 * @return Index file path
+	 *
+	 * @throws TskCoreException if a critical error occurs within TSK core
+	 */
+	public static String getHashDatabaseIndexPath(int dbHandle) throws TskCoreException {
+		return hashDbIndexPathNat(dbHandle);
+	}
+
+	/**
+	 * Open a hash database for lookups
+	 * @param path Path to Hash DB or index file
+	 * @return Handle open db
+	 * @throws TskCoreException if there is an error opening the DB
+	 */
+	public static int openHashDatabase(String path) throws TskCoreException {
+		return hashDbOpenNat(path);
+	}
+
+	/**
+	 * Creates a hash database. Will be of the default TSK hash database type.
+	 *
+	 * @param path The path to the database
+	 *
+	 * @return a handle for that database
+	 *
+	 * @throws TskCoreException if a critical error occurs within TSK core
+	 */
+	public static int createHashDatabase(String path) throws TskCoreException {
+		return hashDbNewNat(path);
+	}
+
+	/**
+	 * Close the currently open lookup databases. Resets the handle counting.
+	 *
+	 * @throws TskCoreException exception thrown if critical error occurs within
+	 *                          TSK
+	 */
+	public static void closeAllHashDatabases() throws TskCoreException {
+		hashDbCloseAll();
+	}
+
+	/**
+	 * Close a particular open lookup database. Existing handles are not
+	 * affected.
+	 *
+	 * @param dbHandle Handle of database to close.
+	 *
+	 * @throws TskCoreException exception thrown if critical error occurs within
+	 *                          TSK
+	 */
+	public static void closeHashDatabase(int dbHandle) throws TskCoreException {
+		hashDbClose(dbHandle);
 	}
 
 	/**
 	 * Get the name of the database
 	 *
-	 * @param path The path to the database
+	 * @param dbHandle Previously opened hash db handle.
+	 *
+	 * @return The display name.
+	 *
 	 * @throws TskCoreException if a critical error occurs within TSK core
 	 */
-	public static String getDatabaseName(String path) throws TskCoreException {
-		return getDbName(path);
+	public static String getHashDatabaseDisplayName(int dbHandle) throws TskCoreException {
+		return hashDbGetDisplayName(dbHandle);
 	}
 
 	/**
-	 * Look up the given hash in the NSRL database
+	 * Lookup the given hash value and get basic answer
 	 *
-	 * @param hash
-	 * @return the status of the hash in the NSRL
-	 * @throws TskCoreException if a critical error occurs within TSK core
-	 */
-	public static TskData.FileKnown nsrlHashLookup(String hash) throws TskCoreException {
-		return TskData.FileKnown.valueOf((byte) nsrlDbLookup(hash));
-	}
-
-	/**
-	 * Look up the given hash in the known bad database
+	 * @param hash     Hash value to search for.
+	 * @param dbHandle Handle of database to lookup in.
 	 *
-	 * @param hash
-	 * @param dbHandle previously opened hash db handle
-	 * @return the status of the hash in the known bad database
-	 * @throws TskCoreException if a critical error occurs within TSK core
-	 */
-	public static TskData.FileKnown knownBadHashLookup(String hash, int dbHandle) throws TskCoreException {
-		return TskData.FileKnown.valueOf((byte) knownBadDbLookup(hash, dbHandle));
-	}
-
-	/**
-	 * Get the size of the index of the given database
+	 * @return True if hash was found in database.
 	 *
-	 * @param path the path to the database
-	 * @return the size of the index or -1 if it doesn't exist
 	 * @throws TskCoreException
 	 */
-	public static int getIndexSize(String path) throws TskCoreException {
-		return getIndexSizeNat(path);
+	public static boolean lookupInHashDatabase(String hash, int dbHandle) throws TskCoreException {
+		return hashDbLookup(hash, dbHandle);
 	}
 
 	/**
-	 * Convert this timezone from long to short form
-	 * Convert timezoneLongForm passed in from long to short form
+	 * Lookup hash value in DB and return details on results (more time
+	 * consuming than basic lookup)
+	 *
+	 * @param hash     Hash value to search for
+	 * @param dbHandle Handle of database to lookup in.
+	 *
+	 * @return Details on hash if it was in DB or null if it was not found.
+	 *
+	 * @throws TskCoreException
+	 */
+	public static HashHitInfo lookupInHashDatabaseVerbose(String hash, int dbHandle) throws TskCoreException {
+		return hashDbLookupVerbose(hash, dbHandle);
+	}
+
+	/**
+	 * Adds a hash value to a hash database.
+	 *
+	 * @param filename Name of file (can be null)
+	 * @param md5      Text of MD5 hash (can be null)
+	 * @param sha1     Text of SHA1 hash (can be null)
+	 * @param sha256   Text of SHA256 hash (can be null)
+	 * @param comment  A comment (can be null)
+	 * @param dbHandle Handle to DB
+	 *
+	 * @throws TskCoreException
+	 */
+	public static void addToHashDatabase(String filename, String md5, String sha1, String sha256, String comment, int dbHandle) throws TskCoreException {
+		hashDbAddEntryNat(filename, md5, sha1, sha256, comment, dbHandle);
+	}
+
+	public static void addToHashDatabase(List<HashEntry> hashes, int dbHandle) throws TskCoreException {
+		hashDbBeginTransactionNat(dbHandle);
+		try {
+			for (HashEntry entry : hashes) {
+				hashDbAddEntryNat(entry.getFileName(), entry.getMd5Hash(), entry.getSha1Hash(), entry.getSha256Hash(), entry.getComment(), dbHandle);
+			}
+			hashDbCommitTransactionNat(dbHandle);
+		} catch (TskCoreException ex) {
+			try {
+				hashDbRollbackTransactionNat(dbHandle);
+			} catch (TskCoreException ex2) {
+				ex2.initCause(ex);
+				throw ex2;
+			}
+			throw ex;
+		}
+	}
+
+	public static boolean isUpdateableHashDatabase(int dbHandle) throws TskCoreException {
+		return hashDbIsUpdateableNat(dbHandle);
+	}
+
+	public static boolean hashDatabaseIsIndexOnly(int dbHandle) throws TskCoreException {
+		return hashDbIsIdxOnlyNat(dbHandle);
+	}
+
+	/**
+	 * Convert this timezone from long to short form Convert timezoneLongForm
+	 * passed in from long to short form
 	 *
 	 * @param timezoneLongForm the long form (e.g., America/New_York)
-	 * @return the short form (e.g., EST5EDT) string representation, or an empty string if
-	 * empty long form was passed in
+	 *
+	 * @return the short form (e.g., EST5EDT) string representation, or an empty
+	 *         string if empty long form was passed in
 	 */
 	private static String timezoneLongToShort(String timezoneLongForm) {
-		if (timezoneLongForm  == null || timezoneLongForm.isEmpty()) {
+		if (timezoneLongForm == null || timezoneLongForm.isEmpty()) {
 			return "";
 		}
-		
-		String timezoneShortForm = "";
+
+		String timezoneShortForm;
 		TimeZone zone = TimeZone.getTimeZone(timezoneLongForm);
 		int offset = zone.getRawOffset() / 1000;
 		int hour = offset / 3600;
@@ -712,9 +1817,67 @@ public class SleuthkitJNI {
 			timezoneShortForm = timezoneShortForm + ":" + (min < 10 ? "0" : "") + Integer.toString(min);
 		}
 		if (hasDaylight) {
-			timezoneShortForm = timezoneShortForm + second;
+			timezoneShortForm += second;
 		}
 		return timezoneShortForm;
+	}
+
+	/**
+	 * Fills in any gaps in the image created by image writer.
+	 *
+	 * @param imgHandle The image handle.
+	 *
+	 * @return 0 if no errors occurred; 1 otherwise.
+	 *
+	 * @throws TskCoreException exception thrown if critical error occurs within
+	 *                          TSK
+	 */
+	public static int finishImageWriter(long imgHandle) throws TskCoreException {
+		getTSKReadLock();
+		try {
+			if(! imgHandleIsValid(imgHandle)) {
+				throw new TskCoreException("Image handle " + imgHandle + " is closed");
+			}
+			return finishImageWriterNat(imgHandle);
+		} finally {
+			releaseTSKReadLock();
+		}
+	}
+
+	/**
+	 * Get the current progress of the finish image process (0-100)
+	 *
+	 * @param imgHandle
+	 *
+	 * @return Percentage of blocks completed (0-100)
+	 */
+	public static int getFinishImageProgress(long imgHandle) {
+		getTSKReadLock();
+		try {
+			if (imgHandleIsValid(imgHandle)) {
+				return getFinishImageProgressNat(imgHandle);
+			} else {
+				return 0;
+			}
+		} finally {
+			releaseTSKReadLock();
+		}
+	}
+
+	/**
+	 * Cancel the finish image process
+	 *
+	 * @param imgHandle
+	 */
+	public static void cancelFinishImage(long imgHandle) {
+		getTSKReadLock();
+		try {
+			if (imgHandleIsValid(imgHandle)) {
+				cancelFinishImageNat(imgHandle);
+			}
+		} finally {
+			releaseTSKReadLock();
+		}
 	}
 
 	/**
@@ -722,11 +1885,293 @@ public class SleuthkitJNI {
 	 * devPath
 	 *
 	 * @param devPath device path pointing to the device
+	 *
 	 * @return size of the device in bytes
+	 *
 	 * @throws TskCoreException exception thrown if the device size could not be
-	 * queried
+	 *                          queried
 	 */
 	public static long findDeviceSize(String devPath) throws TskCoreException {
 		return findDeviceSizeNat(devPath);
 	}
+
+	public static boolean isImageSupported(String imagePath) {
+		return isImageSupportedNat(imagePath);
+	}
+	
+	/** Get the version of the Sleuthkit code in number form.
+	 * Upper byte is A, next is B, and next byte is C in version A.B.C.
+	 * Lowest byte is 0xff, except in beta releases, in which case it
+	 * increments from 1.  Nightly snapshots will have upper byte as
+	 * 0xff and next bytes with year, month, and date, respectively.
+	 * Note that you will not be able to differentiate between snapshots
+	 * from the trunk or branches with this method...
+	 * For example, 3.1.2 would be stored as 0x030102FF.
+	 * 3.1.2b1 would be 0x03010201.  Snapshot from Jan 2, 2003 would be
+	 * 0xFF030102.
+	 * 
+	 * @return the current Sleuthkit version
+     */
+	static long getSleuthkitVersion() {
+		return getSleuthkitVersionNat();
+	}
+
+	/**
+	 * Get a read lock for the C++ layer. Do not get this lock after obtaining
+	 * HandleCache.cacheLock.
+	 */
+	private static void getTSKReadLock() {
+		tskLock.readLock().lock();
+	}
+
+	/**
+	 * Release the read lock
+	 */
+	private static void releaseTSKReadLock() {
+		tskLock.readLock().unlock();
+	}
+	
+	/**
+	 * Get a write lock for the C++ layer. Do not get this lock after obtaining
+	 * HandleCache.cacheLock.
+	 * 
+	 * This is a temporary fix for APFS which is not thread-safe. Should be used
+	 * when accessing anything under a pool.
+	 */
+	private static void getTSKWriteLock() {
+		tskLock.writeLock().lock();
+	}
+
+	/**
+	 * Release the write lock
+	 */
+	private static void releaseTSKWriteLock() {
+		tskLock.writeLock().unlock();
+	}	
+
+	//free pointers
+	/**
+	 * frees the imgHandle pointer currently does not close the image -
+	 * imgHandle should only be freed as part of CaseDbHandle.free().
+	 *
+	 * @param imgHandle to close the image
+	 */
+	@Deprecated
+	public static void closeImg(long imgHandle) {
+		//closeImgNat(imgHandle); 
+	}
+
+	/**
+	 * frees the vsHandle pointer - currently does nothing
+	 *
+	 * @param vsHandle pointer to volume system structure in sleuthkit
+	 */
+	@Deprecated
+	public static void closeVs(long vsHandle) {
+		//		closeVsNat(vsHandle);  TODO JIRA-3829 
+	}
+
+	/**
+	 * frees the fsHandle pointer Currently does not do anything - fsHandle
+	 * should only be freed as part of CaseDbHandle.free().
+	 *
+	 * @param fsHandle pointer to file system structure in sleuthkit
+	 */
+	@Deprecated
+	public static void closeFs(long fsHandle) {
+		//closeFsNat(fsHandle);
+	}
+	
+	/**
+	 * Open the image and return the image info pointer.
+	 *
+	 * @param imageFiles the paths to the images
+	 *
+	 * @return the image info pointer
+	 *
+	 * @throws TskCoreException exception thrown if critical error occurs within
+	 *                          TSK
+	 * @deprecated Use the version with the SleuthkitCase argument
+	 */
+	@Deprecated
+	public static long openImage(String[] imageFiles) throws TskCoreException {
+		
+		return openImage(imageFiles, 0, true, null);
+	}
+
+	/**
+	 * Open the image with a specified sector size and return the image info
+	 * pointer.
+	 *
+	 * @param imageFiles the paths to the images
+	 * @param sSize      the sector size (use '0' for autodetect)
+	 *
+	 * @return the image info pointer
+	 *
+	 * @throws TskCoreException exception thrown if critical error occurs within
+	 *                          TSK
+	 * @deprecated Use the version with the SleuthkitCase argument
+	 */
+	@Deprecated
+	public static long openImage(String[] imageFiles, int sSize) throws TskCoreException {
+		return openImage(imageFiles, sSize, true, null);
+	}
+	
+		
+	/**
+	 * Get file system Handle Opened handle is cached (transparently) so it does
+	 * not need be reopened next time for the duration of the application
+	 *
+	 * @param imgHandle pointer to imgHandle in sleuthkit
+	 * @param fsOffset  byte offset to the file system
+	 *
+	 * @return pointer to a fsHandle structure in the sleuthkit
+	 *
+	 * @throws TskCoreException exception thrown if critical error occurs within
+	 *                          TSK
+	 * @deprecated Use the version with the SleuthkitCase argument
+	 */
+	@Deprecated
+	public static long openFs(long imgHandle, long fsOffset) throws TskCoreException {
+		return openFs(imgHandle, fsOffset, null);
+	}	
+	
+	/**
+	 * Get file Handle
+	 *
+	 * @param fsHandle fsHandle pointer in the sleuthkit
+	 * @param fileId   id of the file
+	 * @param attrType file attribute type to open
+	 * @param attrId   file attribute id to open
+	 *
+	 * @return pointer to a file structure in the sleuthkit
+	 *
+	 * @throws TskCoreException exception thrown if critical error occurs within
+	 *                          TSK
+	 * @deprecated Use the version with the SleuthkitCase argument
+	 */
+	@Deprecated
+	public static long openFile(long fsHandle, long fileId, TSK_FS_ATTR_TYPE_ENUM attrType, int attrId) throws TskCoreException {
+		return openFile(fsHandle, fileId, attrType, attrId, null);
+	}	
+	
+
+	private static native String getVersionNat();
+
+	private static native void startVerboseLoggingNat(String logPath);
+
+	private static native int hashDbOpenNat(String hashDbPath) throws TskCoreException;
+
+	private static native int hashDbNewNat(String hashDbPath) throws TskCoreException;
+
+	private static native int hashDbBeginTransactionNat(int dbHandle) throws TskCoreException;
+
+	private static native int hashDbCommitTransactionNat(int dbHandle) throws TskCoreException;
+
+	private static native int hashDbRollbackTransactionNat(int dbHandle) throws TskCoreException;
+
+	private static native int hashDbAddEntryNat(String filename, String hashMd5, String hashSha1, String hashSha256, String comment, int dbHandle) throws TskCoreException;
+
+	private static native boolean hashDbIsUpdateableNat(int dbHandle);
+
+	private static native boolean hashDbIsReindexableNat(int dbHandle);
+
+	private static native String hashDbPathNat(int dbHandle);
+
+	private static native String hashDbIndexPathNat(int dbHandle);
+
+	private static native String hashDbGetDisplayName(int dbHandle) throws TskCoreException;
+
+	private static native void hashDbCloseAll() throws TskCoreException;
+
+	private static native void hashDbClose(int dbHandle) throws TskCoreException;
+
+	private static native void hashDbCreateIndexNat(int dbHandle) throws TskCoreException;
+
+	private static native boolean hashDbIndexExistsNat(int dbHandle) throws TskCoreException;
+
+	private static native boolean hashDbIsIdxOnlyNat(int dbHandle) throws TskCoreException;
+
+	private static native boolean hashDbLookup(String hash, int dbHandle) throws TskCoreException;
+
+	private static native HashHitInfo hashDbLookupVerbose(String hash, int dbHandle) throws TskCoreException;
+
+	private static native long initAddImgNat(TskCaseDbBridge dbHelperObj, String timezone, boolean addUnallocSpace, boolean skipFatFsOrphans) throws TskCoreException;
+
+	private static native long initializeAddImgNat(TskCaseDbBridge dbHelperObj, String timezone, boolean addFileSystems, boolean addUnallocSpace, boolean skipFatFsOrphans) throws TskCoreException;
+
+	private static native void runOpenAndAddImgNat(long process, String deviceId, String[] imgPath, int splits, String timezone) throws TskCoreException, TskDataException;
+
+	private static native void runAddImgNat(long process, String deviceId, long a_img_info, long image_id, String timeZone, String imageWriterPath) throws TskCoreException, TskDataException;
+
+	private static native void stopAddImgNat(long process) throws TskCoreException;
+
+	private static native long finishAddImgNat(long process) throws TskCoreException;
+
+	private static native long openImgNat(String[] imgPath, int splits, int sSize) throws TskCoreException;
+
+	private static native long openVsNat(long imgHandle, long vsOffset) throws TskCoreException;
+
+	private static native long openVolNat(long vsHandle, long volId) throws TskCoreException;
+	
+	private static native long openPoolNat(long imgHandle, long offset) throws TskCoreException;
+	
+	private static native long getImgInfoForPoolNat(long poolHandle, long poolOffset) throws TskCoreException;
+	
+	private static native long openFsNat(long imgHandle, long fsId) throws TskCoreException;
+
+	private static native long openFileNat(long fsHandle, long fileId, int attrType, int attrId) throws TskCoreException;
+
+	private static native int readImgNat(long imgHandle, byte[] readBuffer, long offset, long len) throws TskCoreException;
+
+	private static native int readVsNat(long vsHandle, byte[] readBuffer, long offset, long len) throws TskCoreException;
+	
+	private static native int readPoolNat(long poolHandle, byte[] readBuffer, long offset, long len) throws TskCoreException;	
+
+	private static native int readVolNat(long volHandle, byte[] readBuffer, long offset, long len) throws TskCoreException;
+
+	private static native int readFsNat(long fsHandle, byte[] readBuffer, long offset, long len) throws TskCoreException;
+
+	private static native int readFileNat(long fileHandle, byte[] readBuffer, long offset, int offset_type, long len) throws TskCoreException;
+
+	private static native int saveFileMetaDataTextNat(long fileHandle, String fileName) throws TskCoreException;
+	
+	private static native String[] getPathsForImageNat(long imgHandle);
+	
+	private static native long getSizeForImageNat(long imgHandle);
+	
+	private static native long getTypeForImageNat(long imgHandle);
+	
+	private static native long getSectorSizeForImageNat(long imgHandle);
+	
+	private static native String getMD5HashForImageNat(long imgHandle);
+	
+	private static native String getSha1HashForImageNat(long imgHandle);
+	
+	private static native String getCollectionDetailsForImageNat(long imgHandle);
+
+	private static native void closeImgNat(long imgHandle);
+	
+	private static native void closePoolNat(long poolHandle);
+
+	private static native void closeVsNat(long vsHandle);
+
+	private static native void closeFsNat(long fsHandle);
+
+	private static native void closeFileNat(long fileHandle);
+
+	private static native long findDeviceSizeNat(String devicePath) throws TskCoreException;
+
+	private static native String getCurDirNat(long process);
+
+	private static native boolean isImageSupportedNat(String imagePath);
+	
+	private static native long getSleuthkitVersionNat();
+
+	private static native int finishImageWriterNat(long a_img_info);
+
+	private static native int getFinishImageProgressNat(long a_img_info);
+
+	private static native void cancelFinishImageNat(long a_img_info);
+
 }

@@ -1,15 +1,15 @@
 /*
- * Autopsy Forensic Browser
- * 
- * Copyright 2012 Basis Technology Corp.
+ * SleuthKit Java Bindings
+ *
+ * Copyright 2011-2017 Basis Technology Corp.
  * Contact: carrier <at> sleuthkit <dot> org
- * 
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *     http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -18,8 +18,6 @@
  */
 package org.sleuthkit.datamodel;
 
-import java.util.Collections;
-import java.util.List;
 import org.sleuthkit.datamodel.TskData.FileKnown;
 import org.sleuthkit.datamodel.TskData.TSK_FS_ATTR_TYPE_ENUM;
 import org.sleuthkit.datamodel.TskData.TSK_FS_META_TYPE_ENUM;
@@ -27,74 +25,121 @@ import org.sleuthkit.datamodel.TskData.TSK_FS_NAME_FLAG_ENUM;
 import org.sleuthkit.datamodel.TskData.TSK_FS_NAME_TYPE_ENUM;
 
 /**
- * Layout directory object representation of a virtual layout directory stored
- * in tsk_files table.
- *
- * Layout directories are not fs directories, but "virtual" directories used to
- * organize LayoutFiles. Since they are not real fs dirs, they have similar
- * attributes to LayoutFiles and they also have children like real Directories.
- *
+ * A virtual directory that can be used as a parent for unallocated space files,
+ * carved files, or derived files. A virtual directory can also be a data
+ * source, with local/logical files as its children. Not a file system
+ * directory.
  */
-public class VirtualDirectory extends AbstractFile {
+public class VirtualDirectory extends SpecialDirectory {
 
-	protected VirtualDirectory(SleuthkitCase db, long objId, String name, TSK_FS_NAME_TYPE_ENUM dirType, 
-			TSK_FS_META_TYPE_ENUM metaType, TSK_FS_NAME_FLAG_ENUM dirFlag, short metaFlags, 
-			long size, String md5Hash, FileKnown knownState, String parentPath) {
-		super(db, objId, TSK_FS_ATTR_TYPE_ENUM.TSK_FS_ATTR_TYPE_DEFAULT, (short)0, name, 
-				TskData.TSK_DB_FILES_TYPE_ENUM.VIRTUAL_DIR, 0L, dirType, metaType, dirFlag, 
-				metaFlags, 0L, 0L, 0L, 0L, 0L, (short)0, 0, 0, md5Hash, knownState, parentPath);
+	/**
+	 * The name given to a virtual directory that contains unallocated space
+	 * files.
+	 */
+	public static final String NAME_UNALLOC = "$Unalloc"; //NON-NLS
+
+	/**
+	 * The name given to a virtual directory that contains carved files.
+	 */
+	public static final String NAME_CARVED = "$CarvedFiles"; //NON-NLS
+
+	/**
+	 * Constructs a virtual directory that can be used as a parent for
+	 * unallocated space files, carved files, or derived files. A virtual
+	 * directory can also be a data source, with local/logical files as its
+	 * children. Not a file system directory.
+	 *
+	 * @param db                 The case database.
+	 * @param objId              The object id of the virtual directory.
+	 * @param dataSourceObjectId The object id of the data source for the
+	 *                           virtual directory; same as objId if the virtual
+	 *                           directory is a data source.
+	 * @param name               The name of the virtual directory.
+	 * @param dirType            The TSK_FS_NAME_TYPE_ENUM for the virtual
+	 *                           directory.
+	 * @param metaType           The TSK_FS_META_TYPE_ENUM for the virtual
+	 *                           directory.
+	 * @param dirFlag            The TSK_FS_META_TYPE_ENUM for the virtual
+	 *                           directory.
+	 * @param metaFlags          The meta flags for the virtual directory.
+	 * @param md5Hash            The MD5 hash for the virtual directory.
+	 * @param knownState         The known state for the virtual directory
+	 * @param parentPath         The parent path for the virtual directory,
+	 *                           should be "/" if the virtual directory is a
+	 *                           data source.
+	 */
+	VirtualDirectory(SleuthkitCase db,
+			long objId,
+			long dataSourceObjectId,
+			String name,
+			TSK_FS_NAME_TYPE_ENUM dirType, TSK_FS_META_TYPE_ENUM metaType,
+			TSK_FS_NAME_FLAG_ENUM dirFlag, short metaFlags,
+			String md5Hash, String sha256Hash, FileKnown knownState,
+			String parentPath) {
+		super(db, objId, dataSourceObjectId, TSK_FS_ATTR_TYPE_ENUM.TSK_FS_ATTR_TYPE_DEFAULT, 0, name,
+				TskData.TSK_DB_FILES_TYPE_ENUM.VIRTUAL_DIR, 0L, 0, dirType, metaType, dirFlag,
+				metaFlags, 0L, 0L, 0L, 0L, 0L, (short) 0, 0, 0, md5Hash, sha256Hash, knownState, parentPath, null);
 	}
 
+	/**
+	 * Gets the data source (e.g., image, virtual directory, etc.) for this
+	 * directory. If the directory is itself a data source, returns the
+	 * directory.
+	 *
+	 * @return The data source.
+	 *
+	 * @throws TskCoreException if there was an error querying the case
+	 *                          database.
+	 */
 	@Override
-	public List<Content> getChildren() throws TskCoreException {
-		return getSleuthkitCase().getLayoutDirectoryChildren(this);
+	public Content getDataSource() throws TskCoreException {
+		if (this.getDataSourceObjectId() == this.getId()) {
+			// This virtual directory is a data source.
+			return this;
+		} else {
+			return super.getDataSource();
+		}
 	}
 
+	/**
+	 * Accepts a content visitor (Visitor design pattern).
+	 *
+	 * @param <T>     The type returned by the visitor.
+	 * @param visitor A ContentVisitor supplying an algorithm to run using this
+	 *                virtual directory as input.
+	 *
+	 * @return The output of the algorithm.
+	 */
 	@Override
-	public List<Long> getChildrenIds() throws TskCoreException {
-		return getSleuthkitCase().getLayoutDirectoryChildrenIds(this);
+	public <T> T accept(ContentVisitor<T> visitor) {
+		return visitor.visit(this);
 	}
 
+	/**
+	 * Accepts a Sleuthkit item visitor (Visitor design pattern).
+	 *
+	 * @param <T>     The type returned by the visitor.
+	 * @param visitor A SleuthkitItemVisitor supplying an algorithm to run using
+	 *                this virtual directory as input.
+	 *
+	 * @return The output of the algorithm.
+	 */
 	@Override
-	public List<TskFileRange> getRanges() throws TskCoreException {
-		return Collections.<TskFileRange>emptyList();
+	public <T> T accept(SleuthkitItemVisitor<T> visitor) {
+		return visitor.visit(this);
 	}
 
+	/**
+	 * Provides a string representation of this virtual directory.
+	 *
+	 * @param preserveState True if state should be included in the string
+	 *                      representation of this object.
+	 * 
+	 * @return The string representation of the virtual directory.
+	 */
 	@Override
-	public void close() {
-		//nothing to be closed
+	public String toString(boolean preserveState) {
+		return super.toString(preserveState) + "VirtualDirectory [\t" + "]\t"; //NON-NLS
 	}
 
-	
-	
-	@Override
-	public int read(byte[] buf, long offset, long len) throws TskCoreException {
-		return 0;
-	}
-
-
-	@Override
-	public boolean isRoot() {
-		return false;
-	}
-
-	@Override
-	public <T> T accept(ContentVisitor<T> v) {
-		return v.visit(this);
-	}
-
-	@Override
-	public <T> T accept(SleuthkitItemVisitor<T> v) {
-		return v.visit(this);
-	}
-
-	@Override
-	public Image getImage() throws TskCoreException {
-		return getParent().getImage();
-	}
-
-	@Override
-	public String toString(boolean preserveState){
-		return super.toString(preserveState) + "VirtualDirectory [\t" + "]\t";
-	}		
 }

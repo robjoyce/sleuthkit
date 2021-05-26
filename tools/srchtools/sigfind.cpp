@@ -9,7 +9,7 @@
  * This software is distributed under the Common Public License 1.0
  */
 
-#include "tsk3/tsk_tools_i.h"
+#include "tsk/tsk_tools_i.h"
 
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -33,7 +33,7 @@ usage()
     fprintf(stderr,
             "\t-t template: The name of a data structure template:\n");
     fprintf(stderr,
-            "\t\tdospart, ext2, ext3, fat, hfs, hfs+, ntfs, ufs1, ufs2\n");
+            "\t\tdospart, ext2, ext3, ext4, fat, hfs, hfs+, ntfs, ufs1, ufs2\n");
     exit(1);
 }
 
@@ -50,7 +50,7 @@ main(int argc, char **argv)
     TSK_OFF_T cur_offset;
     int sig_offset = 0, rel_offset = 0;
     int read_size, bs = 512;
-    daddr_t i, prev_hit;
+    TSK_OFF_T i, prev_hit;
     int sig_size = 0;
     uint8_t lit_end = 0;
     int sig_print = 0;
@@ -90,7 +90,8 @@ main(int argc, char **argv)
 
         case 't':
             if ((strcmp(optarg, "ext2") == 0) ||
-                (strcmp(optarg, "ext3") == 0)) {
+                (strcmp(optarg, "ext3") == 0) ||
+                (strcmp(optarg, "ext4") == 0)) {
                 lit_end = 1;
                 sig[0] = 0x53;
                 sig[1] = 0xef;
@@ -301,8 +302,7 @@ main(int argc, char **argv)
             break;
         }
         else if (retval == -1) {
-            fprintf(stderr, "error reading bytes %lu\n",
-                    (unsigned long) i);
+            fprintf(stderr, "error reading bytes %" PRIdOFF "\n", i);
             exit(1);
         }
 
@@ -312,10 +312,10 @@ main(int argc, char **argv)
             ((sig_size < 3) || (block[rel_offset + 2] == sig[2])) &&
             ((sig_size < 4) || (block[rel_offset + 3] == sig[3]))) {
             if (prev_hit == -1)
-                printf("Block: %lu (-)\n", (unsigned long) i);
+                printf("Block: %" PRIdOFF " (-)\n",  i);
             else
-                printf("Block: %lu (+%lu)\n", (unsigned long) i,
-                       (unsigned long) (i - prev_hit));
+                printf("Block: %" PRIdOFF " (+%" PRIdOFF ")\n", i,
+                       (i - prev_hit));
 
             prev_hit = i;
         }

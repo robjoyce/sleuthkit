@@ -18,7 +18,7 @@
  *          
  */
 
-#include "tsk3/tsk_tools_i.h"
+#include "tsk/tsk_tools_i.h"
 
 #define __DARWIN_64_BIT_INO_T 1		
 
@@ -44,7 +44,7 @@
 #include <string>
 #include <vector>
 
-#include <tsk3/libtsk.h>
+#include <tsk/libtsk.h>
 
 #include "fiwalk.h"
 #include "plugin.h"
@@ -56,6 +56,41 @@
 extern "C" {
 #include <regex.h>
 }
+#endif
+
+#ifndef HAVE_GETLINE
+
+// Here we provide a getline which works for lineptr == nullptr.
+// It is NOT a full replacement for POSIX getline, just enough to
+// do what the single use of getline here does.
+
+#include <cerrno>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
+ssize_t getline(char** lineptr, size_t*, FILE* stream) {
+  char buf[1024];
+  std::string s;
+
+  do {
+    if (std::fgets(buf, sizeof(buf), stream)) {
+      s.append(buf);
+    }
+    else if (std::ferror(stream)) {
+      errno = EINVAL;
+      return -1;
+    }
+  } while (!std::feof(stream) && s[s.size()-1] != '\n');
+
+  // allocate and copy the line
+  *lineptr = static_cast<char*>(malloc(s.size() + 1));
+  std::strcpy(*lineptr, s.c_str());
+
+  // return number of chars read, including newline
+  return s.size();
+}
+
 #endif
 
 class myglob {
@@ -97,7 +132,7 @@ public:
 
 /** describes each plugin */
 class plugins {
-public:;
+public:
     myglob *glob;
     string pattern;		// what we want
     string method;
@@ -165,19 +200,12 @@ void plugin_process(const std::string &fname)
 	string cmd = current_plugin->path + " " + fname;
 	FILE *f = popen(cmd.c_str(),"r");
 	if(!f) err(1,"fopen: %s",cmd.c_str());
-	char linebuf[65536];
-	while (fgets(linebuf,sizeof(linebuf),f)){
+        char *linebuf=0;
+        size_t linecapp=0;
+        if(getline(&linebuf,&linecapp,f)>0){
 	    char *cc = strchr(linebuf,'\n');
 	    if(cc){		// we found an end-of-line
 		*cc = '\000';
-	    }
-	    else {
-		// line was longer than our buffer; why aren't we using c++?
-		// scan to the newline
-		while(!feof(f)){
-		    int ch = fgetc(f);
-		    if(ch<0 || ch=='\n') break;
-		}
 	    }
 	    
 	    /* process name: value pairs */
@@ -197,10 +225,10 @@ void plugin_process(const std::string &fname)
 
 	    /* clean any characters in the name */
 	    for(char *cc=name;*cc;cc++){
-          if (!isalpha(*cc)) *cc='_';
+                if (!isalpha(*cc)) *cc='_';
 	    }
-
 	    file_info(name,value);	// report each identified name & value
+            free(linebuf);
 	}
 	pclose(f);
 	return;

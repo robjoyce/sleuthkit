@@ -31,7 +31,7 @@ effort (for example the reengineering of a great many Capstone chips).
 
 #include <stdio.h>
 #include <string.h>
-#include "tsk3/libtsk.h"
+#include "tsk/libtsk.h"
 
 
 #define SHA_HASH_LENGTH 	20
@@ -76,13 +76,13 @@ main(argc, argv)
 {
     char *myname = argv[0];
     char *crunch();
-    FILE *fp;
 
     if (argc < 2) {
         printf("%s\n", crunch(stdin));
     }
     else {
         while (--argc && *++argv) {
+            FILE *fp;
             if ((fp = fopen(*argv, "r")) == 0) {
                 fprintf(stderr, "%s: ", myname);
                 perror(*argv);

@@ -1,7 +1,7 @@
 /*
  * Sleuth Kit Data Model
  *
- * Copyright 2011 Basis Technology Corp.
+ * Copyright 2011-2018 Basis Technology Corp.
  * Contact: carrier <at> sleuthkit <dot> org
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -35,6 +35,7 @@ public interface ContentVisitor<T> {
 	 * Act on (visit) a Directory content object
 	 *
 	 * @param d the directory to visit / act on
+	 *
 	 * @return result of the visit
 	 */
 	T visit(Directory d);
@@ -43,6 +44,7 @@ public interface ContentVisitor<T> {
 	 * Act on (visit) a File content object
 	 *
 	 * @param f File to visit / act on
+	 *
 	 * @return result of the visit
 	 */
 	T visit(File f);
@@ -51,6 +53,7 @@ public interface ContentVisitor<T> {
 	 * Act on (visit) a FileSystem content object
 	 *
 	 * @param fs file system to visit / act on
+	 *
 	 * @return result of the visit
 	 */
 	T visit(FileSystem fs);
@@ -59,14 +62,25 @@ public interface ContentVisitor<T> {
 	 * Act on (visit) an Image content object
 	 *
 	 * @param i image to visit / act on
+	 *
 	 * @return result of the visit
 	 */
 	T visit(Image i);
+	
+	/**
+	 * Act on (visit) a Pool content object
+	 *
+	 * @param p pool to visit / act on
+	 *
+	 * @return result of the visit
+	 */
+	T visit(Pool p);	
 
 	/**
 	 * Act on (visit) a Volume content object
 	 *
 	 * @param v volume to visit / act on
+	 *
 	 * @return result of the visit
 	 */
 	T visit(Volume v);
@@ -75,6 +89,7 @@ public interface ContentVisitor<T> {
 	 * Act on (visit) a VolumeSystem content object
 	 *
 	 * @param vs volume system to visit / act on
+	 *
 	 * @return result of the visit
 	 */
 	T visit(VolumeSystem vs);
@@ -83,25 +98,73 @@ public interface ContentVisitor<T> {
 	 * Act on (visit) a LayoutFile content object
 	 *
 	 * @param lf layout file to visit / act on
+	 *
 	 * @return result of the visit
 	 */
 	T visit(LayoutFile lf);
 
 	/**
-	 * Act on (visit) a LayoutDirectory content object
+	 * Act on (visit) a VirtualDirectory content object
 	 *
-	 * @param ld layout dir to visit / act on
+	 * @param vd virtual dir to visit / act on
+	 *
 	 * @return result of the visit
 	 */
-	T visit(VirtualDirectory ld);
+	T visit(VirtualDirectory vd);
 	
+	/**
+	 * Act on (visit) a LocalDirectory content object
+	 *
+	 * @param ld local dir to visit / act on
+	 *
+	 * @return result of the visit
+	 */
+	T visit(LocalDirectory ld);	
+
 	/**
 	 * Act on (visit) a DerivedFile content object
 	 *
-	 * @param df derived file to visit / act on
+	 * @param lf local file to visit / act on
+	 *
 	 * @return result of the visit
 	 */
-	T visit(DerivedFile df);
+	T visit(DerivedFile lf);
+
+	/**
+	 * Act on (visit) a LocalFile content object
+	 *
+	 * @param df derived file to visit / act on
+	 *
+	 * @return result of the visit
+	 */
+	T visit(LocalFile df);
+	
+	/**
+	 * Act on (visit) a SlackFile content object
+	 *
+	 * @param sf slack file to visit / act on
+	 *
+	 * @return result of the visit
+	 */
+	T visit(SlackFile sf);	
+
+	/**
+	 * Act on (visit) a blackboard artifact object
+	 *
+	 * @param ba blackboard artifact object to visit / act on
+	 *
+	 * @return result of the visit
+	 */
+	T visit(BlackboardArtifact ba);	
+	
+	/**
+	 * Act on (visit) a Report object
+	 *
+	 * @param r report object to visit / act on
+	 *
+	 * @return result of the visit
+	 */
+	T visit(Report r);
 
 	/**
 	 * The default content visitor - quickest method for implementing a custom
@@ -111,7 +174,7 @@ public interface ContentVisitor<T> {
 	 * differently.
 	 *
 	 * @param <T> generic type, signifies the object type to be returned from
-	 * visit()
+	 *            visit()
 	 */
 	static abstract public class Default<T> implements ContentVisitor<T> {
 
@@ -141,6 +204,11 @@ public interface ContentVisitor<T> {
 		public T visit(Volume v) {
 			return defaultVisit(v);
 		}
+		
+		@Override
+		public T visit(Pool p) {
+			return defaultVisit(p);
+		}
 
 		@Override
 		public T visit(VolumeSystem vs) {
@@ -158,8 +226,33 @@ public interface ContentVisitor<T> {
 		}
 		
 		@Override
+		public T visit(LocalDirectory ld) {
+			return defaultVisit(ld);
+		}
+
+		@Override
 		public T visit(DerivedFile df) {
 			return defaultVisit(df);
+		}
+
+		@Override
+		public T visit(LocalFile lf) {
+			return defaultVisit(lf);
+		}
+		
+		@Override
+		public T visit(SlackFile sf) {
+			return defaultVisit(sf);
+		}
+		
+		@Override
+		public T visit(BlackboardArtifact ba) {
+			return defaultVisit(ba);
+		}
+
+		@Override
+		public T visit(Report r) {
+			return defaultVisit(r);
 		}
 	}
 }

@@ -1,7 +1,7 @@
 /*
- * Autopsy Forensic Browser
+ * Sleuth Kit Data Model
  * 
- * Copyright 2011 Basis Technology Corp.
+ * Copyright 2011-2017 Basis Technology Corp.
  * Contact: carrier <at> sleuthkit <dot> org
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -38,16 +38,16 @@ public class FileSystem extends AbstractContent {
 	/**
 	 * Constructor most inputs are from the database
 	 *
-	 * @param db the case handle
-	 * @param obj_id the unique object id
-	 * @param name filesystem name
-	 * @param img_offset image offset
-	 * @param fs_type filesystem type
-	 * @param block_size block size in this fs
+	 * @param db          the case handle
+	 * @param obj_id      the unique object id
+	 * @param name        filesystem name
+	 * @param img_offset  image offset
+	 * @param fs_type     filesystem type
+	 * @param block_size  block size in this fs
 	 * @param block_count number of blocks in this fs
-	 * @param root_inum the root inum
-	 * @param first_inum the first inum
-	 * @param last_inum the last inum
+	 * @param root_inum   the root inum
+	 * @param first_inum  the first inum
+	 * @param last_inum   the last inum
 	 */
 	protected FileSystem(SleuthkitCase db, long obj_id, String name, long img_offset,
 			TskData.TSK_FS_TYPE_ENUM fs_type, long block_size, long block_count, long root_inum,
@@ -66,8 +66,6 @@ public class FileSystem extends AbstractContent {
 	public void close() {
 		//does nothing currently, we are caching the fs handles
 	}
-	
-	
 
 	@Override
 	public int read(byte[] buf, long offset, long len) throws TskCoreException {
@@ -76,7 +74,6 @@ public class FileSystem extends AbstractContent {
 
 	@Override
 	public long getSize() {
-		// size of the file system
 		return blockSize * blockCount;
 	}
 
@@ -85,14 +82,36 @@ public class FileSystem extends AbstractContent {
 	 * this is called and maintains the handle to it to reuse it
 	 *
 	 * @return a filesystem pointer from the sleuthkit
+	 *
 	 * @throws TskCoreException exception throw if an internal tsk core error
-	 * occurs
+	 *                          occurs
 	 */
 	long getFileSystemHandle() throws TskCoreException {
 		if (filesystemHandle == 0) {
 			synchronized (this) {
 				if (filesystemHandle == 0) {
-					filesystemHandle = SleuthkitJNI.openFs(getImage().getImageHandle(), imgOffset);
+					Content dataSource = getDataSource();
+					if ((dataSource == null) || ( !(dataSource instanceof Image))) {
+						throw new TskCoreException("Data Source of File System is not an image");
+					}
+
+					Image image = (Image) dataSource;
+
+					// Check if this file system is in a pool
+					if (isPoolContent()) {
+						Pool pool = getPool();
+						if (pool == null) {
+							throw new TskCoreException("Error finding pool for file system");
+						}
+
+						Volume poolVolume = getPoolVolume();
+						if (poolVolume == null) {
+							throw new TskCoreException("File system is in a pool but has no volume");
+						}
+						filesystemHandle = SleuthkitJNI.openFsPool(image.getImageHandle(), imgOffset, pool.getPoolHandle(), poolVolume.getStart(), getSleuthkitCase());
+					} else {
+						filesystemHandle = SleuthkitJNI.openFs(image.getImageHandle(), imgOffset, getSleuthkitCase());
+					}
 				}
 			}
 		}
@@ -180,14 +199,14 @@ public class FileSystem extends AbstractContent {
 	public void finalize() throws Throwable {
 		try {
 			if (filesystemHandle != 0) {
-				SleuthkitJNI.closeFs(filesystemHandle);
+				// SleuthkitJNI.closeFs(filesystemHandle); // closeFs is currently a no-op
 				filesystemHandle = 0;
 			}
 		} finally {
 			super.finalize();
 		}
 	}
-
+	
 	@Override
 	public <T> T accept(SleuthkitItemVisitor<T> v) {
 		return v.visit(this);
@@ -199,22 +218,7 @@ public class FileSystem extends AbstractContent {
 	}
 
 	@Override
-	public List<Content> getChildren() throws TskCoreException {
-		return getSleuthkitCase().getFileSystemChildren(this);
-	}
-
-	@Override
-	public List<Long> getChildrenIds() throws TskCoreException {
-		return getSleuthkitCase().getFileSystemChildrenIds(this);
-	}
-
-	@Override
-	public Image getImage() throws TskCoreException {
-		return getParent().getImage();
-	}
-
-	@Override
 	public String toString(boolean preserveState) {
-		return super.toString(preserveState) + "FileSystem [\t" + " blockCount " + blockCount + "\t" + "blockSize " + blockSize + "\t" + "firstInum " + firstInum + "\t" + "fsType " + fsType + "\t" + "imgOffset " + imgOffset + "\t" + "lastInum " + lastInum + "\t" + "rootInum " + rootInum + "\t" + "]";
+		return super.toString(preserveState) + "FileSystem [\t" + " blockCount " + blockCount + "\t" + "blockSize " + blockSize + "\t" + "firstInum " + firstInum + "\t" + "fsType " + fsType + "\t" + "imgOffset " + imgOffset + "\t" + "lastInum " + lastInum + "\t" + "rootInum " + rootInum + "\t" + "]"; //NON-NLS
 	}
 }

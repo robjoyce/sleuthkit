@@ -37,7 +37,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include <tsk3/libtsk.h>
+#include <tsk/libtsk.h>
 
 /**
  * Open a directory and cycle through its contents.  Read each file and recurse
@@ -156,7 +156,7 @@ procDir(TskFsInfo * fs_info, TSK_STACK * stack,
             }
 
             // recurse into another directory (unless it is a '.' or '..')
-            else if (fs_file->getMeta()->getType() == TSK_FS_META_TYPE_DIR) {
+            else if (TSK_FS_IS_DIR_META(fs_file->getMeta()->getType())){
                 if (TSK_FS_ISDOT(fs_file->getName()->getName()) == 0) {
 
                     // only go in if it is not on our stack
@@ -209,7 +209,7 @@ procFs(TskImgInfo * img_info, TSK_OFF_T start)
     if ((fs_info->open(img_info, start, TSK_FS_TYPE_DETECT)) == 1)
     {
         fprintf(stderr,
-            "Error opening file system in partition at offset %" PRIuOFF
+            "Error opening file system in partition at offset %" PRIdOFF
             "\n", start);
         tsk_error_print(stderr);
 
@@ -224,7 +224,7 @@ procFs(TskImgInfo * img_info, TSK_OFF_T start)
     // Process the directories
     if (procDir(fs_info, stack, fs_info->getRootINum(), "")) {
         fprintf(stderr,
-            "Error processing file system in partition at offset %" PRIuOFF
+            "Error processing file system in partition at offset %" PRIdOFF
             "\n", start);
         delete fs_info;
         return 1;

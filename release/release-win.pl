@@ -2,26 +2,26 @@
 
 # Release script for Windows Executables.  Note that this is run
 # after release-unix.pl, which will create the needed tag directories
-# and update the version variables accordingly.  
+# and update the version variables accordingly.
+#
+# This only builds the 32-bit, release target  
 #
 # Assumes:
-#- LIBEWF_HOME environment variable is set and LIBEWF is compiled in there
-#- msbuild is in PATH (currently, this requires that I have c:\wndows\microsoft.NET\Framework\v4XXX in the path)
-#
+#- The correct msbuild is in the PATH
+#-- VS2015 and VS2008 put this in different places.  If VS2008 is found first, you'll get errors
+#   about not finding the 140_xp platform. 
+#-- The easiest way to do this is to launch Cygwin using the appropriate batch file, which sets
+#   the correct environment variables. 
+#- Nuget exe commandline is installed and on path
 #
 # This requires Cygwin with:
 # - git 
 # - zip
 #
-# It will only work with Visual Studio 2010 express. 
-#
 
 use strict;
 
-my $TESTING = 0;
-print "TESTING MODE (no commits)\n" if ($TESTING);
-
-
+# Use 'no-tag' as the tag name to do basic testing
 
 unless (@ARGV == 1) {
 	print stderr "Missing arguments: version\n";
@@ -31,12 +31,9 @@ unless (@ARGV == 1) {
 
 }
 
-
-
 my $RELDIR = `pwd`;	# The release directory
 chomp $RELDIR;
-my $SVNDIR = "$RELDIR/../";
-my $TSKDIR = "${SVNDIR}";
+my $TSKDIR = "$RELDIR/../";
 
 my $TAGNAME = $ARGV[0];
 unless ($TAGNAME eq "no-tag") {
@@ -45,20 +42,8 @@ unless ($TAGNAME eq "no-tag") {
 my $VER = "";
 
 
-# VS 2008 code
-#my $BUILD_LOC = `which vcbuild`;
-#chomp $BUILD_LOC;
-#die "Unsupported build system.  Verify redist location" 
-#    unless ($BUILD_LOC =~ /Visual Studio 9\.0/);
-
 #my $REDIST_LOC = $BUILD_LOC . "/../../redist/x86/Microsoft.VC90.CRT";
 #die "Missing redist dir $REDIST_LOC" unless (-d "$REDIST_LOC");
-
-
-# Verify LIBEWF is built
-die "LIBEWF missing" unless (-d "$ENV{'LIBEWF_HOME'}");
-die "libewf dll missing" 
-	unless (-e "$ENV{'LIBEWF_HOME'}/msvscpp/Release/libewf.dll" ); 
 
 
 #######################
@@ -107,9 +92,7 @@ sub update_code {
 	my $no_tag = 0;
 	$no_tag = 1 if ($TAGNAME eq "no-tag");
 
-
 	if ($no_tag == 0) {
-		`git submodule update`;
 		# Make sure we have no changes in the current tree
 		exec_pipe(*OUT, "git status -s | grep \"^ M\"");
 		my $foo = read_pipe_line(*OUT);
@@ -121,10 +104,7 @@ sub update_code {
 		# Make sure src dir is up to date
 		print "Updating source directory\n";
 		`git pull`;
-		`git submodule init`;
-		`git submodule update`;
-		`git submodule foreach git checkout master`;
-
+		
 		# Verify the tag exists
 		exec_pipe(*OUT, "git tag | grep \"^${TAGNAME}\"");
 		my $foo = read_pipe_line(*OUT);
@@ -154,7 +134,6 @@ sub update_code {
 		die "tag name and configure.ac have different versions ($TAGNAME vs sleuthkit-$VER)" 
 			if ("sleuthkit-".$VER != $TAGNAME);
 	}
-
 }
 
 
@@ -173,10 +152,14 @@ sub build_core {
 
 	die "Release folder not deleted" if (-x "Release/fls.exe");
 
+
+	# Get Dependencies
+	`nuget restore tsk-win.sln`;
+
 	# 2008 version
 	# `vcbuild /errfile:BuildErrors.txt tsk-win.sln "Release|Win32"`; 
-	# 2010 version
-	`msbuild.exe tsk-win.sln /p:Configuration=Release /clp:ErrorsOnly /nologo > BuildErrors.txt`;
+	# 2010/2015 version
+	`msbuild.exe tsk-win.sln /m /p:Configuration=Release /p:platform=Win32 /clp:ErrorsOnly /nologo > BuildErrors.txt`;
 	die "Build errors -- check win32/BuildErrors.txt" if (-s "BuildErrors.txt");
 
 	# Do a basic check on some of the executables
@@ -193,7 +176,7 @@ sub build_core {
 # Runs in root sleuthkit dir
 sub package_core {
 	# Verify that the directory does not already exist
-	my $rfile = "sleuthkit-win32-${VER}";
+	my $rfile = "sleuthkit-${VER}-win32";
 	my $rdir = $RELDIR . "/" . $rfile;
 	die "Release directory already exists: $rdir" if (-d "$rdir");
 
@@ -216,14 +199,12 @@ sub package_core {
 	`rm \"${rdir}/bin/posix-sample.exe\"`;
 	`rm \"${rdir}/bin/posix-cpp-sample.exe\"`;
 
-
 	# mactime
 	`echo 'my \$VER=\"$VER\";' > \"${rdir}/bin/mactime.pl\"`;
 	`cat tools/timeline/mactime.base >> \"${rdir}/bin/mactime.pl\"`;
 
-
 	# Copy standard files
-	`cp README.txt \"${rdir}\"`;
+	`cp README.md \"${rdir}/README.txt\"`;
 	`unix2dos \"${rdir}/README.txt\" 2> /dev/null`;
 	`cp win32/docs/README-win32.txt \"${rdir}\"`;
 	`cp NEWS.txt \"${rdir}\"`;
@@ -232,15 +213,6 @@ sub package_core {
 	`unix2dos \"${rdir}/licenses/cpl1.0.txt\" 2> /dev/null`;
 	`cp licenses/IBM-LICENSE \"${rdir}/licenses\"`;
 	`unix2dos \"${rdir}/licenses/IBM-LICENSE\" 2> /dev/null`;
-
-	# MS Redist dlls and manifest
-	# 2008 version 
-	#`cp \"${REDIST_LOC}\"/* \"${rdir}/bin\"`;
-	#print "******* Using Updated Manifest File *******\n";
-	#`cp \"${RELDIR}/Microsoft.VC90.CRT.manifest\" \"${rdir}/bin\"`;
-
-	# 2010 version
-	copy_runtime_2010("${rdir}/bin");
 
 	# Zip up the files - move there to make the path in the zip short
 	chdir ("$RELDIR") or die "Error changing directories to $RELDIR";
@@ -255,152 +227,8 @@ sub package_core {
 
 ##############################
 
-# Starts and ends in root sleuthkit dir
-sub build_framework {
-	print "Building TSK framework\n";
-
-	chdir "framework/win32/framework" or die "error changing directory into framework/win32";
-	# Get rid of everything in the release dir (since we'll be doing * copy)
-	`rm -rf Release`;
-	`rm -f BuildErrors.txt`;
-	# This was not needed for VS2008, but is for VS2010
-	`rm -rf ../../TskModules/*/win32/Release`;
-
-	# 2008 version
-	#`vcbuild /errfile:BuildErrors.txt framework.sln "Release|Win32"`; 
-	# 2010 version
-	`msbuild.exe framework.sln /p:Configuration=Release /clp:ErrorsOnly /nologo > BuildErrors.txt`;
-	die "Build errors -- check framework/win32/framework/BuildErrors.txt" if (-e "BuildErrors.txt" && -s "BuildErrors.txt");
-
-	# Do a basic check on some of the executables
-	die "libtskframework.dll missing" unless (-x "Release/libtskframework.dll");
-	die "tsk_analyzeimg missing" unless (-x "Release/tsk_analyzeimg.exe");
-	die "HashCalcModule.dll missing" unless (-x "Release/HashCalcModule.dll");
-
-	chdir "../../..";
-}
-
-sub package_framework {
-	# Verify that the directory does not already exist
-	my $rfile = "sleuthkit-framework-win32-${VER}";
-	my $rdir = $RELDIR . "/" . $rfile;
-	die "Release directory already exists: $rdir" if (-d "$rdir");
-
-	# We already checked that it didn't exist
-	print "Creating file in ${rdir}\n";
-
-	# Make the directory structure
-	mkdir ("$rdir") or die "error making release directory: $rdir";
-	mkdir ("${rdir}/bin") or die "error making bin release directory: $rdir";
-	mkdir ("${rdir}/modules") or die "error making module release directory: $rdir";
-	mkdir ("${rdir}/licenses") or die "error making licenses release directory: $rdir";
-	mkdir ("${rdir}/docs") or die "error making docs release directory: $rdir";
-
-	chdir "framework" or die "error changing directory into framework";
-
-	# Copy the files
-	chdir "win32/framework/Release" or die "Error changing directory into release / framework";
-
-	`cp *.exe \"${rdir}/bin\"`;
-	`cp libtsk*.dll \"${rdir}/bin\"`;
-	`cp Poco*.dll \"${rdir}/bin\"`;
-	`cp libewf*.dll \"${rdir}/bin\"`;
-	`cp zlib.dll \"${rdir}/bin\"`;
-
-	
-	# Copy the modules and config dirs
-	opendir(DIR, ".") or die "Error opening framework release folder";
-	while(my $f = readdir(DIR)) {
-		next unless ($f =~ /Module\.dll$/);
-		`cp \"$f\" \"${rdir}/modules\"`;
-		my $base = $1 if ($f =~ /^(.*)\.dll$/);
-		# copy the config dir if it has one
-		if (-d "$base") {
-			`cp -r \"$base\" \"${rdir}/modules\"`;
-		}
-	}
-	closedir(DIR);
-
-
-	# Special case libs
-	# libmagic
-	`cp libmagic-1.dll \"${rdir}/modules\"`;
-	`cp libgnurx-0.dll \"${rdir}/modules\"`;
-
-	chdir "../../..";
-
-
-	`cp SampleConfig/framework_config_bindist.xml \"${rdir}/bin/framework_config.xml\"`;
-	`unix2dos \"${rdir}/bin/framework_config.xml\" 2> /dev/null`;
-
-
-	`cp SampleConfig/pipeline_config.xml \"${rdir}/bin/pipeline_config.xml\"`;
-	`unix2dos \"${rdir}/bin/pipeline_config.xml\" 2> /dev/null`;
-
-
-	# Copy the readme files for each module
-	opendir(my $modDir, "./TskModules") or die "Error opening TskModules folder";
-	while(my $f = readdir($modDir)) {
-		next unless ($f =~ /^c_\w+/);
-		if (-f "TskModules/$f/README.txt") {
-			`cp TskModules/$f/README.txt \"${rdir}/docs/README_${f}.txt\"`;
-			`unix2dos \"${rdir}/docs/README_${f}.txt\" 2> /dev/null`;
-			`cp TskModules/$f/NEWS.txt \"${rdir}/docs/NEWS_${f}.txt\"`;
-			`unix2dos \"${rdir}/docs/NEWS_${f}.txt\" 2> /dev/null`;
-			
-		}
-		else {
-			print "Didn't find readme in $f\n";
-		}
-	}
-	closedir($modDir);
-
-	# Copy the man pages into docs
-	`cp man/*.html \"${rdir}/docs\"`;
-
-	# Copy standard files
-	`cp README_bindist.txt \"${rdir}/README.txt\"`;
-	`unix2dos \"${rdir}/README.txt\"`;
-
-	# Licences
-	`cp ../licenses/cpl1.0.txt \"${rdir}/licenses\"`;
-	`unix2dos \"${rdir}/licenses/cpl1.0.txt\" 2> /dev/null`;
-	`cp ../licenses/IBM-LICENSE \"${rdir}/licenses\"`;
-	`unix2dos \"${rdir}/licenses/IBM-LICENSE\" 2> /dev/null`;
-	#`cp \"${ENV{'LIBEWF_HOME'}}/COPYING\" \"${rdir}/licenses\LGPL-COPYING\"`;
-	#`unix2dos \"${rdir}/licenses/LGPL-COPYING\"`;
-
-	# MS Redist dlls and manifest
-
-	# 2008 version 
-	#`cp \"${REDIST_LOC}\"/* \"${rdir}/bin\"`;
-	#print "******* Using Updated Manifest File *******\n";
-	#`cp \"${RELDIR}/Microsoft.VC90.CRT.manifest\" \"${rdir}/bin\"`;
-
-	# 2010 version
-	copy_runtime_2010("${rdir}/bin");
-
-	# Zip up the files - move there to make the path in the zip short
-	chdir ("$RELDIR") or die "Error changing directories to $RELDIR";
-	`zip -r ${rfile}.zip ${rfile}`;
-
-	die "ZIP file not created" unless (-e "${rfile}.zip");
-
-	print "File saved as ${rfile}.zip in release\n";
-	chdir "..";
-}
-
-# Assumes path in /cygwin/style
-sub copy_runtime_2010 { 
-    	my $dest = shift(@_);
-	`cp /cygdrive/c/windows/system32/msvcp100.dll \"$dest\"`;
-	`cp /cygdrive/c/windows/system32/msvcr100.dll \"$dest\"`;
-}
-
 chdir ("$TSKDIR") or die "Error changing to TSK dir $TSKDIR";
 
 update_code();
 build_core();
 package_core();
-build_framework();
-package_framework();

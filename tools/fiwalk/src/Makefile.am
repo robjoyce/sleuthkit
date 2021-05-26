@@ -1,8 +1,7 @@
 bin_PROGRAMS = fiwalk 
-
-AM_CFLAGS = -Wall
-AM_CPPFLAGS = -I../../.. -Wall
-LDADD = ../../../tsk3/libtsk3.la
+AM_CPPFLAGS = -I../../..
+AM_CXXFLAGS += -Wno-unused-command-line-argument
+LDADD = ../../../tsk/libtsk.la
 
 EXTRA_DIST = README_PLUGINS.txt ficonfig.txt \
     config-simple.txt word-count-plugin.sh \
@@ -10,7 +9,7 @@ EXTRA_DIST = README_PLUGINS.txt ficonfig.txt \
 
 fiwalk_SOURCES = fiwalk.cpp  fiwalk_tsk.cpp fiwalk.h \
 	content.cpp content.h \
-	arff.cpp arff.h outfile.h \
+	arff.cpp arff.h \
 	plugin.cpp plugin.h \
 	utils.c utils.h \
 	dfxml.cpp dfxml.h \
